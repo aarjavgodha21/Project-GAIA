@@ -1,6 +1,6 @@
-import { useEffect, useMemo, useState } from 'react';
+import { useEffect, useMemo, useRef, useState } from 'react';
 import { useNavigate } from 'react-router-dom';
-import { MapContainer, TileLayer, CircleMarker, Tooltip, ZoomControl } from 'react-leaflet';
+import { MapContainer, TileLayer, CircleMarker, Tooltip, ZoomControl, useMap } from 'react-leaflet';
 import * as XLSX from 'xlsx';
 import './Sustainability.css';
 
@@ -60,6 +60,63 @@ const getMarkerColor = (score: number): string => {
 const findColumn = (columns: string[], patterns: RegExp[]) =>
   columns.find((col) => patterns.some((pattern) => pattern.test(col)));
 
+// Component to handle map interactions and panning
+const MapContent = ({ 
+  selectedLocation, 
+  filteredLocations,
+  onLocationClick 
+}: { 
+  selectedLocation: LocationScore | null; 
+  filteredLocations: LocationScore[];
+  onLocationClick: (location: LocationScore) => void;
+}) => {
+  const map = useMap();
+  
+  useEffect(() => {
+    if (selectedLocation) {
+      // Pan and zoom to selected location
+      map.flyTo([selectedLocation.lat, selectedLocation.lon], 8, {
+        duration: 1.5,
+      });
+    }
+  }, [selectedLocation, map]);
+  
+  return (
+    <>
+      {filteredLocations.map((location) => {
+        const status = getStatus(location.score);
+        const markerColor = getMarkerColor(location.score);
+        const isSelected = selectedLocation?.name === location.name && 
+                          selectedLocation?.lat === location.lat && 
+                          selectedLocation?.lon === location.lon;
+        return (
+          <CircleMarker
+            key={`${location.name}-${location.lat}-${location.lon}`}
+            center={[location.lat, location.lon]}
+            radius={isSelected ? 12 : 8}
+            pathOptions={{
+              color: markerColor,
+              fillColor: markerColor,
+              fillOpacity: isSelected ? 0.9 : 0.6,
+              weight: isSelected ? 3 : 2,
+            }}
+            eventHandlers={{
+              click: () => onLocationClick(location),
+            }}
+          >
+            <Tooltip direction="top" offset={[0, -6]} opacity={1}>
+              <strong>{location.name}</strong>
+              <div>Score: {location.score.toFixed(1)} / 100</div>
+              <div>Status: {status.label}</div>
+              <div style={{ fontSize: '0.75rem', marginTop: '4px' }}>Click for details</div>
+            </Tooltip>
+          </CircleMarker>
+        );
+      })}
+    </>
+  );
+};
+
 const Sustainability = () => {
   const navigate = useNavigate();
   const [locations, setLocations] = useState<LocationScore[]>([]);
@@ -88,7 +145,8 @@ const Sustainability = () => {
         const latCol = findColumn(columns, [/lat/i, /latitude/i]);
         const lonCol = findColumn(columns, [/lon/i, /lng/i, /long/i, /longitude/i]);
         const scoreCol = findColumn(columns, [/score/i, /sustain/i, /index/i, /aqi/i]);
-        const nameCol = findColumn(columns, [/city/i, /location/i, /region/i, /district/i, /station/i]);
+        // Prioritize Station name, then City, then others
+        const nameCol = findColumn(columns, [/station/i]) || findColumn(columns, [/city/i, /location/i, /region/i, /district/i]);
         
         const pm25Col = findColumn(columns, [/pm2\.5|pm25|pm2_5/i]);
         const pm10Col = findColumn(columns, [/pm10|pm_10/i]);
@@ -242,36 +300,11 @@ const Sustainability = () => {
                 attribution='&copy; OpenStreetMap contributors'
                 url="https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png"
               />
-              {filteredLocations.map((location) => {
-                const status = getStatus(location.score);
-                const markerColor = getMarkerColor(location.score);
-                const isSelected = selectedLocation?.name === location.name && 
-                                  selectedLocation?.lat === location.lat && 
-                                  selectedLocation?.lon === location.lon;
-                return (
-                  <CircleMarker
-                    key={`${location.name}-${location.lat}-${location.lon}`}
-                    center={[location.lat, location.lon]}
-                    radius={isSelected ? 12 : 8}
-                    pathOptions={{
-                      color: markerColor,
-                      fillColor: markerColor,
-                      fillOpacity: isSelected ? 0.9 : 0.6,
-                      weight: isSelected ? 3 : 2,
-                    }}
-                    eventHandlers={{
-                      click: () => setSelectedLocation(location),
-                    }}
-                  >
-                    <Tooltip direction="top" offset={[0, -6]} opacity={1}>
-                      <strong>{location.name}</strong>
-                      <div>Score: {location.score.toFixed(1)} / 100</div>
-                      <div>Status: {status.label}</div>
-                      <div style={{ fontSize: '0.75rem', marginTop: '4px' }}>Click for details</div>
-                    </Tooltip>
-                  </CircleMarker>
-                );
-              })}
+              <MapContent 
+                selectedLocation={selectedLocation}
+                filteredLocations={filteredLocations}
+                onLocationClick={setSelectedLocation}
+              />
             </MapContainer>
           </div>
           <div className="legend">

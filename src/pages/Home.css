@@ -53,6 +53,25 @@
   filter: drop-shadow(0 0 20px rgba(16, 185, 129, 0.5));
 }
 
+.leaf-icon {
+  width: 100%;
+  height: 100%;
+  filter: drop-shadow(0 0 20px rgba(16, 185, 129, 0.5));
+  animation: leafFloat 3s ease-in-out infinite;
+}
+
+@keyframes leafFloat {
+  0% {
+    transform: translateY(0px) rotate(0deg);
+  }
+  50% {
+    transform: translateY(-15px) rotate(5deg);
+  }
+  100% {
+    transform: translateY(0px) rotate(0deg);
+  }
+}
+
 /* Title */
 .title {
   font-size: 5rem;
