@@ -176,34 +176,27 @@ const Home = () => {
           </motion.button>
         </motion.div>
 
-        {/* Floating info cards */}
+        {/* Feature highlights */}
         <motion.div 
-          className="info-cards"
+          className="feature-highlights"
           initial={{ opacity: 0 }}
           animate={{ opacity: 1 }}
           transition={{ duration: 1, delay: 1.2 }}
         >
-          <motion.div 
-            className="info-card"
-            whileHover={{ y: -5 }}
-          >
-            <div className="card-icon">🌍</div>
-            <div className="card-text">Real-time Analysis</div>
-          </motion.div>
-          <motion.div 
-            className="info-card"
-            whileHover={{ y: -5 }}
-          >
-            <div className="card-icon">🤖</div>
-            <div className="card-text">AI Predictions</div>
-          </motion.div>
-          <motion.div 
-            className="info-card"
-            whileHover={{ y: -5 }}
-          >
-            <div className="card-icon">📈</div>
-            <div className="card-text">Data Insights</div>
-          </motion.div>
+          <div className="feature-item">
+            <span className="feature-dot" />
+            <span className="feature-label">Real-time Analysis</span>
+          </div>
+          <div className="feature-divider" />
+          <div className="feature-item">
+            <span className="feature-dot" />
+            <span className="feature-label">AI Predictions</span>
+          </div>
+          <div className="feature-divider" />
+          <div className="feature-item">
+            <span className="feature-dot" />
+            <span className="feature-label">Data Insights</span>
+          </div>
         </motion.div>
       </motion.div>
     </div>

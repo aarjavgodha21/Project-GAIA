@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useRef, useState } from 'react';
+import { useEffect, useMemo, useState } from 'react';
 import { useNavigate } from 'react-router-dom';
 import { MapContainer, TileLayer, CircleMarker, Tooltip, ZoomControl, useMap } from 'react-leaflet';
 import * as XLSX from 'xlsx';
@@ -170,7 +170,7 @@ const Sustainability = () => {
               return null;
             }
 
-            return {
+            const loc: LocationScore = {
               name: nameValue,
               lat,
               lon,
@@ -181,7 +181,8 @@ const Sustainability = () => {
               no2: no2Col ? Number(row[no2Col]) || undefined : undefined,
               o3: o3Col ? Number(row[o3Col]) || undefined : undefined,
               so2: so2Col ? Number(row[so2Col]) || undefined : undefined,
-            } satisfies LocationScore;
+            };
+            return loc;
           })
           .filter((item): item is LocationScore => item !== null);
 
@@ -201,14 +202,6 @@ const Sustainability = () => {
 
     loadDataset();
   }, []);
-
-  const stats = useMemo(() => {
-    if (!selectedLocation) {
-      return null;
-    }
-    const status = getStatus(selectedLocation.score);
-    return { location: selectedLocation, status };
-  }, [selectedLocation]);
 
   const center = useMemo<[number, number]>(() => {
     if (!locations.length) {
@@ -242,6 +235,13 @@ const Sustainability = () => {
         </div>
         <p className="sustainability-subtitle">Explore real-time sustainability scores across India. Each marker represents a location's ecological health status.</p>
       </div>
+
+      {loading && (
+        <div className="loading-overlay">
+          <div className="loading-spinner" />
+          <p className="loading-text">Loading sustainability data...</p>
+        </div>
+      )}
 
       <div className="sustainability-grid">
         <div className="panel">
