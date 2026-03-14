@@ -62,3 +62,9 @@ Desktop.ini
 tmp/
 temp/
 *.tmp
+Dataset/species.csv
+Dataset/The Dataset of World Forest Cover in 2000.csv
+Dataset/The Dataset of World Forest Cover in 2020.csv
+Dataset/urban_heat_island_dataset.csv
+Dataset/The Dataset of World Forest Cover in 2010.csv
+Dataset/water_potability.csv
