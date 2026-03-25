@@ -84,11 +84,42 @@
   display: grid;
   grid-template-columns: 1fr;
   gap: 2rem;
+  align-items: start;
 }
 
 @media (min-width: 1200px) {
   .sustainability-grid {
     grid-template-columns: 2.5fr 1fr;
+    align-items: stretch;
+  }
+
+  .sustainability-grid > .panel {
+    height: 100%;
+    min-height: 0;
+  }
+
+  .sustainability-grid > .info-card {
+    overflow-y: auto;
+    scrollbar-width: thin;
+    scrollbar-color: rgba(59, 130, 246, 0.45) rgba(15, 23, 42, 0.45);
+  }
+
+  .sustainability-grid > .info-card::-webkit-scrollbar {
+    width: 8px;
+  }
+
+  .sustainability-grid > .info-card::-webkit-scrollbar-track {
+    background: rgba(15, 23, 42, 0.45);
+    border-radius: 8px;
+  }
+
+  .sustainability-grid > .info-card::-webkit-scrollbar-thumb {
+    background: rgba(59, 130, 246, 0.45);
+    border-radius: 8px;
+  }
+
+  .sustainability-grid > .info-card::-webkit-scrollbar-thumb:hover {
+    background: rgba(59, 130, 246, 0.65);
   }
 }
 
@@ -243,6 +274,8 @@
   box-shadow: 0 20px 40px rgba(15, 23, 42, 0.4);
   backdrop-filter: blur(20px);
   animation: fadeInUp 0.8s ease-out;
+  align-self: start;
+  height: fit-content;
 }
 
 .coverage-controls {
@@ -486,14 +519,19 @@
 }
 
 .info-grid {
-  display: grid;
-  grid-template-columns: 1fr;
-  gap: 2rem;
+  columns: 1;
+  column-gap: 1.25rem;
 }
 
-@media (min-width: 768px) {
+@media (min-width: 960px) {
   .info-grid {
-    grid-template-columns: repeat(auto-fit, minmax(300px, 1fr));
+    columns: 2;
+  }
+}
+
+@media (min-width: 1280px) {
+  .info-grid {
+    columns: 3;
   }
 }
 
@@ -501,8 +539,10 @@
   background: rgba(15, 23, 42, 0.8);
   border: 1px solid rgba(148, 163, 184, 0.25);
   border-radius: 16px;
-  padding: 1.5rem;
+  padding: 1.3rem;
   animation: fadeInUp 0.8s ease-out;
+  align-self: start;
+  height: fit-content;
 }
 
 .info-card h3 {
@@ -522,10 +562,10 @@
 
 .guideline, .metric-info, .calculation {
   background: rgba(30, 41, 59, 0.6);
-  padding: 1rem;
+  padding: 0.85rem;
   border-radius: 12px;
   border-left: 3px solid rgba(16, 185, 129, 0.4);
-  margin-top: 1rem;
+  margin-top: 0.8rem;
 }
 
 .guideline strong, .calculation strong {
@@ -541,7 +581,7 @@
 }
 
 .guideline li, .calculation li {
-  padding: 0.4rem 0;
+  padding: 0.3rem 0;
   color: #cbd5e1;
   font-size: 0.9rem;
 }
@@ -722,9 +762,11 @@
   border-radius: 50%;
 }
 
-.info-card {
+.info-section .info-card {
   display: grid;
-  gap: 1rem;
+  gap: 0.75rem;
+  break-inside: avoid;
+  margin: 0 0 1.25rem;
 }
 
 .metric {

@@ -15,10 +15,12 @@ import { Line, Bar } from 'react-chartjs-2';
 import {
   INDIAN_CITIES,
   computeSustainabilityScore,
+  fetchEnvironmentalContext,
   fetchCurrentAirQuality,
   fetchHistoricalAirQuality,
   getApiThrottleStatus,
 } from '../services/airQualityService';
+import type { EnvironmentalContext } from '../services/airQualityService';
 import './Predictions.css';
 
 // Register Chart.js components
@@ -53,12 +55,16 @@ type ForecastConfidence = {
   years: number;
   monthlyPoints: number;
   volatility: number;
+  sourceQuality: number;
 };
 
 type ScenarioSettings = {
   pm25ChangePct: number;
   no2ChangePct: number;
   coChangePct: number;
+  deforestationPressurePct: number;
+  biodiversityResiliencePct: number;
+  waterQualityResiliencePct: number;
 };
 
 type CityGroup = {
@@ -116,8 +122,20 @@ const CITY_OPTIONS: CityOption[] = INDIAN_CITIES
 const currentYear = new Date().getFullYear();
 const YEARS = [currentYear, currentYear + 1, currentYear + 2, currentYear + 3, currentYear + 4];
 const MONTHS = ['Jan', 'Feb', 'Mar', 'Apr', 'May', 'Jun', 'Jul', 'Aug', 'Sep', 'Oct', 'Nov', 'Dec'];
+const ZERO_SCENARIO: ScenarioSettings = {
+  pm25ChangePct: 0,
+  no2ChangePct: 0,
+  coChangePct: 0,
+  deforestationPressurePct: 0,
+  biodiversityResiliencePct: 0,
+  waterQualityResiliencePct: 0,
+};
 
 const clamp = (value: number, min: number, max: number) => Math.max(min, Math.min(max, value));
+const calcPercentDelta = (baseline: number, next: number) => {
+  if (!Number.isFinite(baseline) || baseline === 0) return 0;
+  return ((next - baseline) / baseline) * 100;
+};
 
 const getScoreStatus = (score: number) => {
   if (score >= 70) return 'good';
@@ -272,7 +290,13 @@ const getPredictedMetrics = (yearlyMetrics: YearlyMetrics[], targetYear: number)
   };
 };
 
-const buildCoTrendData = (yearlyMetrics: YearlyMetrics[], targetYear: number) => {
+const buildCoTrendData = (
+  yearlyMetrics: YearlyMetrics[],
+  targetYear: number,
+  scenario: ScenarioSettings,
+  liveCo: number | null,
+  ecologicalShiftPct: number,
+) => {
   if (!yearlyMetrics.length) {
     return {
       labels: [] as string[],
@@ -296,9 +320,24 @@ const buildCoTrendData = (yearlyMetrics: YearlyMetrics[], targetYear: number) =>
   const safePoints = points.filter((point) => Number.isFinite(point.y));
   const fallback = safePoints.length ? safePoints[safePoints.length - 1].y : 0;
   const residual = residualStdDev(safePoints);
+  const scenarioImpactRatio = (
+    scenario.coChangePct * 0.7 +
+    scenario.pm25ChangePct * 0.2 +
+    scenario.no2ChangePct * 0.1 +
+    ecologicalShiftPct * 0.25
+  ) / 100;
+  const latestHistoricalCo = safePoints.length ? safePoints[safePoints.length - 1].y : 0;
+  const liveCalibration = liveCo !== null && latestHistoricalCo > 0
+    ? clamp(liveCo / latestHistoricalCo, 0.7, 1.35)
+    : 1;
+
   const forecastValues = futureYears.map((year) => {
     const predicted = linearRegressionPredict(safePoints, year);
-    return Math.max(0, Number.isFinite(predicted) ? predicted : fallback);
+    const baseValue = Math.max(0, Number.isFinite(predicted) ? predicted : fallback);
+    const yearsFromNow = Math.max(1, year - lastHistoricalYear);
+    const ramp = Math.min(1, yearsFromNow / Math.max(1, targetYear - lastHistoricalYear));
+    const scenarioAdjusted = baseValue * liveCalibration * (1 + scenarioImpactRatio * ramp);
+    return Math.max(0, scenarioAdjusted);
   });
 
   const forecastLowerValues = forecastValues.map((value, index) => {
@@ -343,7 +382,41 @@ const buildAqiData = (monthly: MonthlyAqi[], targetYear: number) => {
   return { labels: MONTHS, values };
 };
 
-const getForecastConfidence = (yearlyMetrics: YearlyMetrics[], monthlyAqi: MonthlyAqi[]): ForecastConfidence => {
+const buildScenarioAqiData = (
+  baseAqiData: { labels: string[]; values: number[] },
+  scenario: ScenarioSettings,
+  liveAqi: number | null,
+  ecologicalShiftPct: number,
+) => {
+  const avgBase = baseAqiData.values.length
+    ? baseAqiData.values.reduce((sum, value) => sum + value, 0) / baseAqiData.values.length
+    : 0;
+  const liveCalibration = liveAqi !== null && avgBase > 0
+    ? clamp(liveAqi / avgBase, 0.7, 1.35)
+    : 1;
+
+  const scenarioImpactRatio = (
+    scenario.pm25ChangePct * 0.5 +
+    scenario.no2ChangePct * 0.35 +
+    scenario.coChangePct * 0.15 +
+    ecologicalShiftPct * 0.3
+  ) / 100;
+
+  const values = baseAqiData.values.map((value, index) => {
+    const seasonalWeight = 0.85 + (Math.sin((index / 12) * Math.PI * 2) + 1) * 0.1;
+    const adjusted = value * liveCalibration * (1 + scenarioImpactRatio * seasonalWeight);
+    return Math.round(Math.max(0, adjusted));
+  });
+
+  return { labels: baseAqiData.labels, values };
+};
+
+const getForecastConfidence = (
+  yearlyMetrics: YearlyMetrics[],
+  monthlyAqi: MonthlyAqi[],
+  environmentContext: EnvironmentalContext | null,
+  liveDataSource: 'live' | 'cache-fresh' | 'cache-stale' | null,
+): ForecastConfidence => {
   if (!yearlyMetrics.length) {
     return {
       score: 0,
@@ -352,6 +425,7 @@ const getForecastConfidence = (yearlyMetrics: YearlyMetrics[], monthlyAqi: Month
       years: 0,
       monthlyPoints: 0,
       volatility: 0,
+      sourceQuality: 0,
     };
   }
 
@@ -363,18 +437,31 @@ const getForecastConfidence = (yearlyMetrics: YearlyMetrics[], monthlyAqi: Month
   const yearCoverage = clamp(years / 8, 0, 1);
   const monthCoverage = clamp(monthlyPoints / (12 * 5), 0, 1);
   const stability = 1 - clamp(volatility / 80, 0, 1);
+  const envSignalQuality = environmentContext
+    ? environmentContext.externalSignalsSource === 'live'
+      ? 1
+      : environmentContext.externalSignalsSource === 'partial'
+        ? 0.7
+        : 0.45
+    : 0.4;
+  const liveSourceQuality = liveDataSource === 'live'
+    ? 1
+    : liveDataSource === 'cache-fresh'
+      ? 0.82
+      : 0.65;
+  const sourceQuality = Math.round(((envSignalQuality * 0.55) + (liveSourceQuality * 0.45)) * 100);
 
-  const score = Math.round((yearCoverage * 0.45 + monthCoverage * 0.25 + stability * 0.3) * 100);
+  const score = Math.round((yearCoverage * 0.4 + monthCoverage * 0.22 + stability * 0.23 + (sourceQuality / 100) * 0.15) * 100);
   const label: ForecastConfidence['label'] = score >= 75 ? 'High' : score >= 55 ? 'Medium' : 'Low';
 
   const summary =
     label === 'High'
-      ? 'Strong signal from historical trends with relatively stable year-over-year behavior.'
+      ? 'Strong signal from historical trends with stable behavior and reliable live source quality.'
       : label === 'Medium'
-        ? 'Reasonable signal, but variability and/or limited history can affect precision.'
-        : 'Low confidence due to limited history or high volatility. Treat as directional guidance.';
+        ? 'Reasonable signal, but variability, source quality, and/or limited history can affect precision.'
+        : 'Low confidence due to limited history, high volatility, or weaker real-time source quality. Treat as directional guidance.';
 
-  return { score, label, summary, years, monthlyPoints, volatility };
+  return { score, label, summary, years, monthlyPoints, volatility, sourceQuality };
 };
 
 const getRiskAlerts = (
@@ -520,8 +607,10 @@ const Predictions = () => {
   const [error, setError] = useState('');
   const [updatedAt, setUpdatedAt] = useState('');
   const [currentAqi, setCurrentAqi] = useState<number | null>(null);
+  const [currentCo, setCurrentCo] = useState<number | null>(null);
   const [yearlyMetrics, setYearlyMetrics] = useState<YearlyMetrics[]>([]);
   const [monthlyAqi, setMonthlyAqi] = useState<MonthlyAqi[]>([]);
+  const [environmentContext, setEnvironmentContext] = useState<EnvironmentalContext | null>(null);
   const [dataSource, setDataSource] = useState<'live' | 'cache-fresh' | 'cache-stale' | null>(null);
   const [cacheAgeMinutes, setCacheAgeMinutes] = useState<number>(0);
   const [cooldownRemainingMs, setCooldownRemainingMs] = useState(0);
@@ -529,6 +618,9 @@ const Predictions = () => {
     pm25ChangePct: 0,
     no2ChangePct: 0,
     coChangePct: 0,
+    deforestationPressurePct: 0,
+    biodiversityResiliencePct: 0,
+    waterQualityResiliencePct: 0,
   });
 
   const selectedCity = useMemo(
@@ -581,6 +673,8 @@ const Predictions = () => {
         setMonthlyAqi([]);
         setError('');
         setCurrentAqi(null);
+        setCurrentCo(null);
+        setEnvironmentContext(null);
         setUpdatedAt('');
         setDataSource(null);
         setCacheAgeMinutes(0);
@@ -591,12 +685,15 @@ const Predictions = () => {
       setError('');
       try {
         const endDate = new Date().toISOString().slice(0, 10);
-        const [live, historical] = await Promise.all([
+        const [live, historical, environment] = await Promise.all([
           fetchCurrentAirQuality(selectedCity.lat, selectedCity.lon),
           fetchHistoricalAirQuality(selectedCity.lat, selectedCity.lon, '2020-01-01', endDate),
+          fetchEnvironmentalContext(selectedCity.lat, selectedCity.lon, { allowStaleCache: true }),
         ]);
 
         setCurrentAqi(live.aqi);
+        setCurrentCo(live.co);
+        setEnvironmentContext(environment);
         setUpdatedAt(live.updatedAt);
         setDataSource(live.dataSource);
         setCacheAgeMinutes(live.cacheAgeMinutes);
@@ -641,16 +738,48 @@ const Predictions = () => {
     if (!metrics) return null;
 
     const applyPct = (value: number, pct: number) => Math.max(0, value * (1 + pct / 100));
+    const liveDeforestationPressure = environmentContext ? environmentContext.deforestationPressureProxy / 100 : 0;
+    const liveBiodiversity = environmentContext ? environmentContext.biodiversitySignal / 100 : 0;
+    const liveWaterProxy = environmentContext ? environmentContext.waterQualityProxy / 100 : 0;
+
+    const ecoPressure = clamp((scenario.deforestationPressurePct / 100) + (liveDeforestationPressure * 0.55), -1, 1);
+    const biodiversityRelief = clamp((scenario.biodiversityResiliencePct / 100) + (liveBiodiversity * 0.45), -1, 1);
+    const waterRelief = clamp((scenario.waterQualityResiliencePct / 100) + (liveWaterProxy * 0.4), -1, 1);
+    const weatherPressure = environmentContext ? environmentContext.ecoStressIndex / 100 : 0;
+
+    const combinedAqiShift = (
+      (scenario.pm25ChangePct * 0.5)
+      + (scenario.no2ChangePct * 0.25)
+      + (scenario.coChangePct * 0.15)
+      + (ecoPressure * 100 * 0.22)
+      + (weatherPressure * 100 * 0.18)
+      - (biodiversityRelief * 100 * 0.14)
+      - (waterRelief * 100 * 0.12)
+    );
 
     return {
-      aqi: Math.round(
-        applyPct(metrics.aqi, (scenario.pm25ChangePct * 0.6) + (scenario.no2ChangePct * 0.3) + (scenario.coChangePct * 0.1)),
-      ),
+      aqi: Math.round(applyPct(metrics.aqi, combinedAqiShift)),
       pm25: Math.round(applyPct(metrics.pm25, scenario.pm25ChangePct) * 10) / 10,
       no2: Math.round(applyPct(metrics.no2, scenario.no2ChangePct) * 10) / 10,
       co: Math.round(applyPct(metrics.co, scenario.coChangePct) * 10) / 10,
     };
-  }, [metrics, scenario]);
+  }, [environmentContext, metrics, scenario]);
+
+  const ecologicalShiftPct = useMemo(() => {
+    const weatherPressure = environmentContext ? environmentContext.ecoStressIndex / 100 : 0;
+    const liveDeforestationPressure = environmentContext ? environmentContext.deforestationPressureProxy : 0;
+    const liveBiodiversityRelief = environmentContext ? environmentContext.biodiversitySignal : 0;
+    const liveWaterRelief = environmentContext ? environmentContext.waterQualityProxy : 0;
+    return (
+      scenario.deforestationPressurePct * 0.55
+      + liveDeforestationPressure * 0.32
+      - scenario.biodiversityResiliencePct * 0.35
+      - liveBiodiversityRelief * 0.2
+      - scenario.waterQualityResiliencePct * 0.3
+      - liveWaterRelief * 0.18
+      + weatherPressure * 18
+    );
+  }, [environmentContext, scenario.biodiversityResiliencePct, scenario.deforestationPressurePct, scenario.waterQualityResiliencePct]);
 
   const score = useMemo(() => {
     if (!scenarioMetrics) return 0;
@@ -661,13 +790,51 @@ const Predictions = () => {
 
   const co2 = useMemo(() => {
     if (!yearlyMetrics.length) return null;
-    return buildCoTrendData(yearlyMetrics, year);
-  }, [yearlyMetrics, year]);
+    return buildCoTrendData(yearlyMetrics, year, scenario, currentCo, ecologicalShiftPct);
+  }, [yearlyMetrics, year, scenario, currentCo, ecologicalShiftPct]);
 
-  const aqi = useMemo(() => {
+  const baseCo2 = useMemo(() => {
+    if (!yearlyMetrics.length) return null;
+    return buildCoTrendData(yearlyMetrics, year, ZERO_SCENARIO, currentCo, 0);
+  }, [yearlyMetrics, year, currentCo]);
+
+  const baseAqi = useMemo(() => {
     if (!monthlyAqi.length) return null;
     return buildAqiData(monthlyAqi, year);
   }, [monthlyAqi, year]);
+
+  const aqi = useMemo(() => {
+    if (!baseAqi) return null;
+    return buildScenarioAqiData(baseAqi, scenario, currentAqi, ecologicalShiftPct);
+  }, [baseAqi, scenario, currentAqi, ecologicalShiftPct]);
+
+  const coDeltaPct = useMemo(() => {
+    if (!co2 || !baseCo2) return 0;
+
+    const getLastNumeric = (arr: Array<number | null>) => {
+      for (let i = arr.length - 1; i >= 0; i -= 1) {
+        const value = arr[i];
+        if (typeof value === 'number' && Number.isFinite(value)) return value;
+      }
+      return 0;
+    };
+
+    const baseline = getLastNumeric(baseCo2.forecast);
+    const current = getLastNumeric(co2.forecast);
+    return calcPercentDelta(baseline, current);
+  }, [co2, baseCo2]);
+
+  const aqiDeltaPct = useMemo(() => {
+    if (!aqi || !baseAqi) return 0;
+
+    const avg = (values: number[]) => (values.length
+      ? values.reduce((sum, value) => sum + value, 0) / values.length
+      : 0);
+
+    const baselineAvg = avg(baseAqi.values);
+    const scenarioAvg = avg(aqi.values);
+    return calcPercentDelta(baselineAvg, scenarioAvg);
+  }, [aqi, baseAqi]);
 
   const alerts = useMemo(() => {
     if (!selectedCityName || !scenarioMetrics) return [];
@@ -675,8 +842,8 @@ const Predictions = () => {
   }, [selectedCityName, year, scenarioMetrics, currentAqi]);
 
   const confidence = useMemo(
-    () => getForecastConfidence(yearlyMetrics, monthlyAqi),
-    [yearlyMetrics, monthlyAqi],
+    () => getForecastConfidence(yearlyMetrics, monthlyAqi, environmentContext, dataSource),
+    [yearlyMetrics, monthlyAqi, environmentContext, dataSource],
   );
 
   const metricRanges = useMemo(() => {
@@ -777,6 +944,9 @@ const Predictions = () => {
         <p className="predictions-subtitle">
           Forecasts use city coordinates with state and district metadata for better location clarity. District names are locality-based labels when official district boundaries are unavailable.
         </p>
+        <p className="predictions-subtitle">
+          Active model factors include air quality (AQI/PM2.5/NO₂/CO), climate stress (humidity/temperature/precipitation/UV/wind/heatwave), biodiversity signal, wildfire activity, and scenario sliders for deforestation, biodiversity resilience, and water quality resilience.
+        </p>
       </div>
 
       {/* ── Input Panel ── */}
@@ -853,7 +1023,7 @@ const Predictions = () => {
         </div>
         <div className="scenario-controls">
           <h4>Scenario Mode (What-if adjustments)</h4>
-          <p>Adjust pollution assumptions to simulate intervention or deterioration and instantly see forecast impact.</p>
+          <p>Adjust pollution and ecological assumptions (deforestation, biodiversity, water quality). Forecasts combine these with live city factors and show source-quality-aware confidence.</p>
           <div className="scenario-grid">
             <label>
               PM2.5 change: {scenario.pm25ChangePct}%
@@ -866,6 +1036,18 @@ const Predictions = () => {
             <label>
               CO change: {scenario.coChangePct}%
               <input type="range" min={-30} max={30} step={5} value={scenario.coChangePct} onChange={(e) => setScenario((prev) => ({ ...prev, coChangePct: Number(e.target.value) }))} />
+            </label>
+            <label>
+              Deforestation pressure: {scenario.deforestationPressurePct}%
+              <input type="range" min={-30} max={30} step={5} value={scenario.deforestationPressurePct} onChange={(e) => setScenario((prev) => ({ ...prev, deforestationPressurePct: Number(e.target.value) }))} />
+            </label>
+            <label>
+              Biodiversity resilience: {scenario.biodiversityResiliencePct}%
+              <input type="range" min={-30} max={30} step={5} value={scenario.biodiversityResiliencePct} onChange={(e) => setScenario((prev) => ({ ...prev, biodiversityResiliencePct: Number(e.target.value) }))} />
+            </label>
+            <label>
+              Water quality resilience: {scenario.waterQualityResiliencePct}%
+              <input type="range" min={-30} max={30} step={5} value={scenario.waterQualityResiliencePct} onChange={(e) => setScenario((prev) => ({ ...prev, waterQualityResiliencePct: Number(e.target.value) }))} />
             </label>
           </div>
         </div>
@@ -939,7 +1121,18 @@ const Predictions = () => {
                 <span>Years used: <strong>{confidence.years}</strong></span>
                 <span>Monthly points: <strong>{confidence.monthlyPoints}</strong></span>
                 <span>AQI volatility: <strong>{confidence.volatility.toFixed(1)}</strong></span>
+                <span>Source quality: <strong>{confidence.sourceQuality}%</strong></span>
               </div>
+              {environmentContext && (
+                <div className="confidence-stats" style={{ marginTop: '0.5rem' }}>
+                  <span>Humidity: <strong>{environmentContext.humidity.toFixed(0)}%</strong></span>
+                  <span>Temp: <strong>{environmentContext.temperature.toFixed(1)}°C</strong></span>
+                  <span>UV index: <strong>{environmentContext.uvIndex.toFixed(1)}</strong></span>
+                  <span>Wind speed: <strong>{environmentContext.windSpeed.toFixed(1)} km/h</strong></span>
+                  <span>Heatwave days (7d): <strong>{environmentContext.heatwaveDaysNextWeek}</strong></span>
+                  <span>Eco stress index: <strong>{environmentContext.ecoStressIndex}</strong></span>
+                </div>
+              )}
             </div>
           </div>
 
@@ -948,7 +1141,12 @@ const Predictions = () => {
             {/* CO Trend Chart */}
             <div className="pred-card">
               <h3><span className="card-icon">🌫️</span> CO Concentration Trend — {selectedCityName}</h3>
-              <p className="chart-note">Historical points are city observations; forecast band shows uncertainty widening over future years.</p>
+              <div className="delta-row">
+                <span className={`delta-pill ${coDeltaPct <= 0 ? 'good' : 'risk'}`}>
+                  Scenario delta vs baseline: {coDeltaPct >= 0 ? '+' : ''}{coDeltaPct.toFixed(1)}%
+                </span>
+              </div>
+              <p className="chart-note">Historical points are city observations; forecast reflects scenario inputs (PM2.5 {scenario.pm25ChangePct}%, NO₂ {scenario.no2ChangePct}%, CO {scenario.coChangePct}%, eco shift {ecologicalShiftPct.toFixed(1)}%).</p>
               {co2 && (
                 <div className="chart-container">
                   <Line
@@ -967,7 +1165,7 @@ const Predictions = () => {
                           spanGaps: false,
                         },
                         {
-                          label: 'Forecast',
+                          label: 'Forecast (scenario-adjusted)',
                           data: co2.forecast,
                           borderColor: '#3b82f6',
                           backgroundColor: 'rgba(59, 130, 246, 0.15)',
@@ -1011,7 +1209,12 @@ const Predictions = () => {
             {/* AQI Trend Chart */}
             <div className="pred-card">
               <h3><span className="card-icon">💨</span> Monthly AQI Forecast — {selectedCityName}, {year}</h3>
-              <p className="chart-note">Bar colors map AQI health categories, helping quickly identify risky seasonal windows.</p>
+              <div className="delta-row">
+                <span className={`delta-pill ${aqiDeltaPct <= 0 ? 'good' : 'risk'}`}>
+                  Scenario delta vs baseline: {aqiDeltaPct >= 0 ? '+' : ''}{aqiDeltaPct.toFixed(1)}%
+                </span>
+              </div>
+              <p className="chart-note">Bar colors map AQI health categories. Monthly values are city-specific forecasts calibrated to live AQI and adjusted by your scenario sliders.</p>
               {aqi && (
                 <div className="chart-container">
                   <Bar
@@ -1052,6 +1255,30 @@ const Predictions = () => {
                   ))
                 )}
               </div>
+            </div>
+
+            <div className="pred-card">
+              <h3><span className="card-icon">🧠</span> Model Diagnostics</h3>
+              <div className="confidence-stats">
+                <span>Ecological shift: <strong>{ecologicalShiftPct.toFixed(1)}%</strong></span>
+                <span>Deforestation pressure: <strong>{scenario.deforestationPressurePct}%</strong></span>
+                <span>Biodiversity resilience: <strong>{scenario.biodiversityResiliencePct}%</strong></span>
+                <span>Water quality resilience: <strong>{scenario.waterQualityResiliencePct}%</strong></span>
+              </div>
+              {environmentContext && (
+                <div className="confidence-stats" style={{ marginTop: '0.6rem' }}>
+                  <span>Humidity: <strong>{environmentContext.humidity.toFixed(0)}%</strong></span>
+                  <span>Temperature: <strong>{environmentContext.temperature.toFixed(1)}°C</strong></span>
+                  <span>Precipitation: <strong>{environmentContext.precipitation.toFixed(2)} mm</strong></span>
+                  <span>Heatwave days: <strong>{environmentContext.heatwaveDaysNextWeek}</strong></span>
+                  <span>Biodiversity signal: <strong>{environmentContext.biodiversitySignal}</strong></span>
+                  <span>Wildfire events (30d): <strong>{environmentContext.wildfireEvents30d}</strong></span>
+                  <span>Deforestation proxy: <strong>{environmentContext.deforestationPressureProxy}</strong></span>
+                  <span>Water quality proxy: <strong>{environmentContext.waterQualityProxy}</strong></span>
+                  <span>Eco stress index: <strong>{environmentContext.ecoStressIndex}</strong></span>
+                  <span>External signal source: <strong>{environmentContext.externalSignalsSource}</strong></span>
+                </div>
+              )}
             </div>
 
             {/* Key Metrics */}

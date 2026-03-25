@@ -1,7 +1,8 @@
 import { useCallback, useEffect, useMemo, useState } from 'react';
 import { useNavigate } from 'react-router-dom';
 import { MapContainer, TileLayer, CircleMarker, Tooltip, ZoomControl, useMap, useMapEvents } from 'react-leaflet';
-import { fetchCurrentAirQuality, getApiThrottleStatus, getMapCoverageCities } from '../services/airQualityService';
+import { fetchCurrentAirQuality, fetchEnvironmentalContext, getApiThrottleStatus, getMapCoverageCities } from '../services/airQualityService';
+import type { EnvironmentalContext } from '../services/airQualityService';
 import 'leaflet/dist/leaflet.css';
 import './Sustainability.css';
 
@@ -217,6 +218,8 @@ const Sustainability = () => {
     renderedCount: 0,
     zoom: 5,
   });
+  const [selectedEnvContext, setSelectedEnvContext] = useState<EnvironmentalContext | null>(null);
+  const [envLoading, setEnvLoading] = useState<boolean>(false);
   const [cooldownRemainingMs, setCooldownRemainingMs] = useState(0);
 
   useEffect(() => {
@@ -306,6 +309,27 @@ const Sustainability = () => {
   useEffect(() => {
     loadLiveData();
   }, [loadLiveData]);
+
+  useEffect(() => {
+    const loadSelectedEnvironmentalContext = async () => {
+      if (!selectedLocation) {
+        setSelectedEnvContext(null);
+        return;
+      }
+
+      setEnvLoading(true);
+      try {
+        const context = await fetchEnvironmentalContext(selectedLocation.lat, selectedLocation.lon, { allowStaleCache: true });
+        setSelectedEnvContext(context);
+      } catch {
+        setSelectedEnvContext(null);
+      } finally {
+        setEnvLoading(false);
+      }
+    };
+
+    loadSelectedEnvironmentalContext();
+  }, [selectedLocation]);
 
   const center = useMemo<[number, number]>(() => {
     if (!locations.length) {
@@ -665,6 +689,65 @@ const Sustainability = () => {
                   </div>
                 )}
               </div>
+              <div className="air-quality-section">
+                <h4>Environmental Signals</h4>
+                {envLoading && (
+                  <div className="metric-detail">
+                    <span className="metric-label">Status</span>
+                    <span className="metric-value">Loading...</span>
+                  </div>
+                )}
+                {!envLoading && selectedEnvContext && (
+                  <>
+                    <div className="metric-detail">
+                      <span className="metric-label">Humidity</span>
+                      <span className="metric-value">{selectedEnvContext.humidity.toFixed(0)}%</span>
+                    </div>
+                    <div className="metric-detail">
+                      <span className="metric-label">Temperature</span>
+                      <span className="metric-value">{selectedEnvContext.temperature.toFixed(1)}°C</span>
+                    </div>
+                    <div className="metric-detail">
+                      <span className="metric-label">UV Index</span>
+                      <span className="metric-value">{selectedEnvContext.uvIndex.toFixed(1)}</span>
+                    </div>
+                    <div className="metric-detail">
+                      <span className="metric-label">Wind Speed</span>
+                      <span className="metric-value">{selectedEnvContext.windSpeed.toFixed(1)} km/h</span>
+                    </div>
+                    <div className="metric-detail">
+                      <span className="metric-label">Heatwave Days (7d)</span>
+                      <span className="metric-value">{selectedEnvContext.heatwaveDaysNextWeek}</span>
+                    </div>
+                    <div className="metric-detail">
+                      <span className="metric-label">Biodiversity Signal</span>
+                      <span className="metric-value">{selectedEnvContext.biodiversitySignal}</span>
+                    </div>
+                    <div className="metric-detail">
+                      <span className="metric-label">Wildfire Events (30d)</span>
+                      <span className="metric-value">{selectedEnvContext.wildfireEvents30d}</span>
+                    </div>
+                    <div className="metric-detail">
+                      <span className="metric-label">Deforestation Proxy</span>
+                      <span className="metric-value">{selectedEnvContext.deforestationPressureProxy}</span>
+                    </div>
+                    <div className="metric-detail">
+                      <span className="metric-label">Water Quality Proxy</span>
+                      <span className="metric-value">{selectedEnvContext.waterQualityProxy}</span>
+                    </div>
+                    <div className="metric-detail">
+                      <span className="metric-label">Eco Stress Index</span>
+                      <span className="metric-value">{selectedEnvContext.ecoStressIndex}</span>
+                    </div>
+                  </>
+                )}
+                {!envLoading && !selectedEnvContext && (
+                  <div className="metric-detail">
+                    <span className="metric-label">Status</span>
+                    <span className="metric-value">Unavailable</span>
+                  </div>
+                )}
+              </div>
               <div className="status-breakdown">
                 <h4>Status Breakdown</h4>
                 {selectedLocation.score >= 70 && (
@@ -750,7 +833,21 @@ const Sustainability = () => {
                 <li>NO₂ concentration - 15% weight</li>
                 <li>CO concentration - 10% weight</li>
               </ul>
-              <p className="note">Data source: Open-Meteo Air Quality API. Values are refreshed from live atmospheric model output and transformed to a 0-100 ecological health score.</p>
+              <p className="note">Primary score uses live air-quality factors above. Predictions additionally include real-time humidity, temperature, precipitation, UV, wind, heatwave, biodiversity signal, and wildfire activity.</p>
+            </div>
+          </div>
+
+          <div className="info-card">
+            <h3>Integrated Environmental Functions</h3>
+            <p>Both Sustainability and Predictions now run with the same multi-factor ecosystem context.</p>
+            <div className="calculation">
+              <p><strong>Live no-key sources currently connected:</strong></p>
+              <ul>
+                <li>Open-Meteo: air quality + weather (humidity, temperature, precipitation, UV, wind)</li>
+                <li>NASA EONET: wildfire events (30-day local activity)</li>
+                <li>GBIF: biodiversity occurrence signal</li>
+              </ul>
+              <p className="note">Deforestation and water-quality are currently modeled as real-time proxies derived from wildfire and climate stress. Source quality is surfaced in the diagnostics panel.</p>
             </div>
           </div>
         </div>

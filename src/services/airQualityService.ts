@@ -36,6 +36,24 @@ export type AirQualityHistory = {
   aqi: number[];
 };
 
+export type EnvironmentalContext = {
+  humidity: number;
+  temperature: number;
+  precipitation: number;
+  uvIndex: number;
+  windSpeed: number;
+  heatwaveDaysNextWeek: number;
+  biodiversitySignal: number;
+  wildfireEvents30d: number;
+  deforestationPressureProxy: number;
+  waterQualityProxy: number;
+  ecoStressIndex: number;
+  updatedAt: string;
+  dataSource: 'live' | 'cache-fresh' | 'cache-stale';
+  cacheAgeMinutes: number;
+  externalSignalsSource: 'live' | 'partial' | 'unavailable';
+};
+
 export const INDIAN_CITIES: CityLocation[] = INDIAN_CITY_DATA.map((city) => ({
   name: city.name,
   lat: city.lat,
@@ -70,8 +88,12 @@ export const getMapCoverageCities = (maxCities: number): CityLocation[] => {
 };
 
 const AQ_API_BASE = 'https://air-quality-api.open-meteo.com/v1/air-quality';
+const WEATHER_API_BASE = 'https://api.open-meteo.com/v1/forecast';
+const GBIF_API_BASE = 'https://api.gbif.org/v1';
+const EONET_API_BASE = 'https://eonet.gsfc.nasa.gov/api/v3';
 const CURRENT_CACHE_TTL_MS = 30 * 60 * 1000;
 const HISTORY_CACHE_TTL_MS = 6 * 60 * 60 * 1000;
+const ENVIRONMENT_CACHE_TTL_MS = 30 * 60 * 1000;
 const MAX_CONCURRENT_API_REQUESTS = 2;
 const MIN_REQUEST_GAP_MS = 260;
 
@@ -126,6 +148,55 @@ const buildHistoryUrl = (lat: number, lon: number, startDate: string, endDate: s
   });
 
   return `${AQ_API_BASE}?${params.toString()}`;
+};
+
+const buildEnvironmentUrl = (lat: number, lon: number) => {
+  const params = new URLSearchParams({
+    latitude: String(lat),
+    longitude: String(lon),
+    current: 'temperature_2m,relative_humidity_2m,precipitation,uv_index,wind_speed_10m',
+    daily: 'temperature_2m_max',
+    forecast_days: '7',
+    timezone: 'auto',
+  });
+
+  return `${WEATHER_API_BASE}?${params.toString()}`;
+};
+
+const buildGbifOccurrenceUrl = (lat: number, lon: number) => {
+  const delta = 0.35;
+  const minLat = lat - delta;
+  const maxLat = lat + delta;
+  const minLon = lon - delta;
+  const maxLon = lon + delta;
+  const geometry = `POLYGON((${minLon} ${minLat},${maxLon} ${minLat},${maxLon} ${maxLat},${minLon} ${maxLat},${minLon} ${minLat}))`;
+  const yearStart = new Date().getFullYear() - 1;
+  const yearEnd = new Date().getFullYear();
+
+  const params = new URLSearchParams({
+    geometry,
+    has_coordinate: 'true',
+    year: `${yearStart},${yearEnd}`,
+    limit: '0',
+  });
+
+  return `${GBIF_API_BASE}/occurrence/search?${params.toString()}`;
+};
+
+const buildEonetWildfireUrl = (lat: number, lon: number) => {
+  const delta = 0.5;
+  const minLat = lat - delta;
+  const maxLat = lat + delta;
+  const minLon = lon - delta;
+  const maxLon = lon + delta;
+  const params = new URLSearchParams({
+    category: 'wildfires',
+    status: 'all',
+    days: '30',
+    bbox: `${minLon},${minLat},${maxLon},${maxLat}`,
+  });
+
+  return `${EONET_API_BASE}/events?${params.toString()}`;
 };
 
 const safeStorageGet = <T,>(key: string): T | null => {
@@ -463,6 +534,153 @@ export const fetchHistoricalAirQuality = async (
     }
 
     const message = error instanceof Error ? error.message : 'Failed to fetch historical air-quality data.';
+    throw new Error(message);
+  }
+};
+
+export const fetchEnvironmentalContext = async (
+  lat: number,
+  lon: number,
+  options?: { allowStaleCache?: boolean },
+): Promise<EnvironmentalContext> => {
+  const cacheKey = `gaia:eco:context:${lat.toFixed(4)}:${lon.toFixed(4)}`;
+  const cached = safeStorageGet<{ timestamp: number; value: EnvironmentalContext }>(cacheKey);
+
+  const fromCache = (source: 'cache-fresh' | 'cache-stale') => {
+    if (!cached) return null;
+    return {
+      ...cached.value,
+      uvIndex: Number.isFinite(cached.value.uvIndex) ? cached.value.uvIndex : 0,
+      windSpeed: Number.isFinite(cached.value.windSpeed) ? cached.value.windSpeed : 0,
+      biodiversitySignal: Number.isFinite(cached.value.biodiversitySignal) ? cached.value.biodiversitySignal : 50,
+      wildfireEvents30d: Number.isFinite(cached.value.wildfireEvents30d) ? cached.value.wildfireEvents30d : 0,
+      deforestationPressureProxy: Number.isFinite(cached.value.deforestationPressureProxy) ? cached.value.deforestationPressureProxy : 0,
+      waterQualityProxy: Number.isFinite(cached.value.waterQualityProxy) ? cached.value.waterQualityProxy : 50,
+      externalSignalsSource: cached.value.externalSignalsSource ?? 'unavailable',
+      dataSource: source,
+      cacheAgeMinutes: getCacheAgeMinutes(cached.timestamp),
+    };
+  };
+
+  if (cached && isCacheFresh(cached.timestamp, ENVIRONMENT_CACHE_TTL_MS)) {
+    const value = fromCache('cache-fresh');
+    if (value) return value;
+  }
+
+  if (cached && options?.allowStaleCache) {
+    const value = fromCache('cache-stale');
+    if (value) return value;
+  }
+
+  try {
+    const [weatherPayload, gbifPayload, eonetPayload] = await Promise.all([
+      fetchJsonWithRetry(buildEnvironmentUrl(lat, lon), 2),
+      fetchJsonWithRetry(buildGbifOccurrenceUrl(lat, lon), 1).catch(() => null),
+      fetchJsonWithRetry(buildEonetWildfireUrl(lat, lon), 1).catch(() => null),
+    ]);
+
+    const payload = weatherPayload as {
+      current?: {
+        temperature_2m?: unknown;
+        relative_humidity_2m?: unknown;
+        precipitation?: unknown;
+        uv_index?: unknown;
+        wind_speed_10m?: unknown;
+        time?: unknown;
+      };
+      daily?: {
+        temperature_2m_max?: unknown;
+      };
+    };
+
+    const current = payload?.current;
+    if (!current) {
+      throw new Error('Environmental context response missing current values.');
+    }
+
+    const temperature = Number(current.temperature_2m);
+    const humidity = Number(current.relative_humidity_2m);
+    const precipitation = Number(current.precipitation);
+    const uvIndex = Number(current.uv_index);
+    const windSpeed = Number(current.wind_speed_10m);
+
+    if (![temperature, humidity, precipitation].every(Number.isFinite)) {
+      throw new Error('Environmental context response returned invalid values.');
+    }
+
+    const dailyMax = Array.isArray(payload?.daily?.temperature_2m_max)
+      ? (payload?.daily?.temperature_2m_max as unknown[]).map((value) => Number(value)).filter(Number.isFinite)
+      : [];
+
+    const heatwaveDaysNextWeek = dailyMax.filter((temp) => temp >= 40).length;
+
+    const gbifCount = Number((gbifPayload as { count?: unknown } | null)?.count ?? 0);
+    const biodiversitySignal = Math.round(clamp(Math.log10(Math.max(1, gbifCount)) / 4, 0, 1) * 100);
+
+    const wildfireEventsRaw = Array.isArray((eonetPayload as { events?: unknown } | null)?.events)
+      ? ((eonetPayload as { events: unknown[] }).events.length)
+      : 0;
+    const wildfireEvents30d = wildfireEventsRaw;
+    const deforestationPressureProxy = Math.round(clamp(wildfireEvents30d / 12, 0, 1) * 100);
+
+    const humidityStress = clamp(Math.abs(humidity - 55) / 45, 0, 1);
+    const heatStress = clamp((temperature - 30) / 15, 0, 1);
+    const rainfallRelief = 1 - clamp(precipitation / 5, 0, 1);
+    const uvStress = clamp((Number.isFinite(uvIndex) ? uvIndex : 0) / 11, 0, 1);
+    const windStress = clamp((Number.isFinite(windSpeed) ? windSpeed : 0) / 40, 0, 1);
+    const heatwaveStress = clamp(heatwaveDaysNextWeek / 7, 0, 1);
+    const wildfireStress = clamp(wildfireEvents30d / 10, 0, 1);
+    const biodiversityRelief = 1 - clamp(biodiversitySignal / 100, 0, 1);
+    const waterQualityProxy = Math.round((1 - clamp(heatStress * 0.35 + rainfallRelief * 0.3 + humidityStress * 0.15 + uvStress * 0.1 + windStress * 0.1, 0, 1)) * 100);
+    const ecoStressIndex = Math.round(
+      clamp(
+        humidityStress * 0.13
+        + heatStress * 0.2
+        + rainfallRelief * 0.11
+        + uvStress * 0.1
+        + windStress * 0.1
+        + heatwaveStress * 0.16
+        + wildfireStress * 0.12
+        + biodiversityRelief * 0.08,
+        0,
+        1,
+      ) * 100,
+    );
+
+    const externalSignalsSource: EnvironmentalContext['externalSignalsSource'] = gbifPayload && eonetPayload
+      ? 'live'
+      : gbifPayload || eonetPayload
+        ? 'partial'
+        : 'unavailable';
+
+    const context: EnvironmentalContext = {
+      humidity,
+      temperature,
+      precipitation,
+      uvIndex: Number.isFinite(uvIndex) ? uvIndex : 0,
+      windSpeed: Number.isFinite(windSpeed) ? windSpeed : 0,
+      heatwaveDaysNextWeek,
+      biodiversitySignal,
+      wildfireEvents30d,
+      deforestationPressureProxy,
+      waterQualityProxy,
+      ecoStressIndex,
+      updatedAt: String(current.time ?? new Date().toISOString()),
+      dataSource: 'live',
+      cacheAgeMinutes: 0,
+      externalSignalsSource,
+    };
+
+    safeStorageSet(cacheKey, { timestamp: Date.now(), value: context });
+    return context;
+  } catch (error) {
+    const fallback = cached
+      ? fromCache(isCacheFresh(cached.timestamp, ENVIRONMENT_CACHE_TTL_MS) ? 'cache-fresh' : 'cache-stale')
+      : null;
+
+    if (fallback) return fallback;
+
+    const message = error instanceof Error ? error.message : 'Failed to fetch environmental context.';
     throw new Error(message);
   }
 };
