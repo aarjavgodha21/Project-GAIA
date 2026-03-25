@@ -18,6 +18,14 @@ export type LiveAirQuality = {
   co: number;
   sustainabilityScore: number;
   updatedAt: string;
+  dataSource: 'live' | 'cache-fresh' | 'cache-stale';
+  cacheAgeMinutes: number;
+};
+
+export type ApiThrottleStatus = {
+  isCoolingDown: boolean;
+  retryAt: number | null;
+  remainingMs: number;
 };
 
 export type AirQualityHistory = {
@@ -69,6 +77,7 @@ const MIN_REQUEST_GAP_MS = 260;
 
 let activeApiRequests = 0;
 let lastRequestStartedAt = 0;
+let apiCooldownUntil = 0;
 
 const clamp = (value: number, min: number, max: number) => Math.max(min, Math.min(max, value));
 
@@ -153,7 +162,14 @@ const normalizeUpdatedAt = (raw: unknown): string => {
 
 const normalizeCachedLiveValue = (cached: { timestamp: number; value: LiveAirQuality }) => {
   const normalizedUpdatedAt = normalizeUpdatedAt(cached.value.updatedAt);
-  if (normalizedUpdatedAt === cached.value.updatedAt) {
+  const safeDataSource = cached.value.dataSource ?? 'cache-fresh';
+  const safeCacheAge = Number.isFinite(cached.value.cacheAgeMinutes) ? cached.value.cacheAgeMinutes : getCacheAgeMinutes(cached.timestamp);
+
+  if (
+    normalizedUpdatedAt === cached.value.updatedAt
+    && safeDataSource === cached.value.dataSource
+    && safeCacheAge === cached.value.cacheAgeMinutes
+  ) {
     return cached;
   }
 
@@ -162,13 +178,31 @@ const normalizeCachedLiveValue = (cached: { timestamp: number; value: LiveAirQua
     value: {
       ...cached.value,
       updatedAt: normalizedUpdatedAt,
+      dataSource: safeDataSource,
+      cacheAgeMinutes: safeCacheAge,
     },
   };
 };
 
 const sleep = (ms: number) => new Promise((resolve) => setTimeout(resolve, ms));
 
+const getCacheAgeMinutes = (cachedAt: number) => Math.max(0, Math.round((Date.now() - cachedAt) / 60000));
+
+export const getApiThrottleStatus = (): ApiThrottleStatus => {
+  const remainingMs = Math.max(0, apiCooldownUntil - Date.now());
+  return {
+    isCoolingDown: remainingMs > 0,
+    retryAt: remainingMs > 0 ? apiCooldownUntil : null,
+    remainingMs,
+  };
+};
+
 const acquireRequestSlot = async () => {
+  const cooldown = getApiThrottleStatus();
+  if (cooldown.isCoolingDown) {
+    await sleep(cooldown.remainingMs);
+  }
+
   while (activeApiRequests >= MAX_CONCURRENT_API_REQUESTS) {
     await sleep(35);
   }
@@ -225,6 +259,11 @@ const fetchJsonWithRetry = async (url: string, retries = 2): Promise<unknown> =>
         if (retryAfterMs !== undefined) {
           error.retryAfterMs = retryAfterMs;
         }
+
+        if (response.status === 429) {
+          const fallbackMs = 2500;
+          apiCooldownUntil = Math.max(apiCooldownUntil, Date.now() + (retryAfterMs ?? fallbackMs));
+        }
         throw error;
       }
 
@@ -266,11 +305,19 @@ export const fetchCurrentAirQuality = async (
   }
 
   if (cached && isCacheFresh(cached.timestamp, CURRENT_CACHE_TTL_MS)) {
-    return cached.value;
+    return {
+      ...cached.value,
+      dataSource: 'cache-fresh',
+      cacheAgeMinutes: getCacheAgeMinutes(cached.timestamp),
+    };
   }
 
   if (cached && options?.allowStaleCache) {
-    return cached.value;
+    return {
+      ...cached.value,
+      dataSource: 'cache-stale',
+      cacheAgeMinutes: getCacheAgeMinutes(cached.timestamp),
+    };
   }
 
   try {
@@ -313,13 +360,19 @@ export const fetchCurrentAirQuality = async (
       co,
       sustainabilityScore: computeSustainabilityScore(aqi, pm25, no2, co),
       updatedAt: String(current.time ?? new Date().toISOString()),
+      dataSource: 'live',
+      cacheAgeMinutes: 0,
     };
 
     safeStorageSet(cacheKey, { timestamp: Date.now(), value: live });
     return live;
   } catch (error) {
     if (cached) {
-      return cached.value;
+      return {
+        ...cached.value,
+        dataSource: isCacheFresh(cached.timestamp, CURRENT_CACHE_TTL_MS) ? 'cache-fresh' : 'cache-stale',
+        cacheAgeMinutes: getCacheAgeMinutes(cached.timestamp),
+      };
     }
 
     const message = error instanceof Error ? error.message : 'Failed to fetch live air-quality data.';

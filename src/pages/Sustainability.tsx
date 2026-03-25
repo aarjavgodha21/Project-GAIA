@@ -1,7 +1,7 @@
 import { useCallback, useEffect, useMemo, useState } from 'react';
 import { useNavigate } from 'react-router-dom';
 import { MapContainer, TileLayer, CircleMarker, Tooltip, ZoomControl, useMap, useMapEvents } from 'react-leaflet';
-import { fetchCurrentAirQuality, getMapCoverageCities } from '../services/airQualityService';
+import { fetchCurrentAirQuality, getApiThrottleStatus, getMapCoverageCities } from '../services/airQualityService';
 import 'leaflet/dist/leaflet.css';
 import './Sustainability.css';
 
@@ -20,6 +20,8 @@ type LocationScore = {
   so2?: number;
   co?: number;
   updatedAt?: string;
+  dataSource?: 'live' | 'cache-fresh' | 'cache-stale';
+  cacheAgeMinutes?: number;
 };
 const INDIA_BOUNDS: [[number, number], [number, number]] = [
   [6.5, 68.0],
@@ -193,6 +195,15 @@ const Sustainability = () => {
   const [coverageMode, setCoverageMode] = useState<CoverageMode>('standard');
   const coverageConfig = COVERAGE_CONFIG[coverageMode];
   const mapCities = useMemo(() => getMapCoverageCities(coverageConfig.cityCount), [coverageConfig.cityCount]);
+  const prioritizedMapCities = useMemo(() => {
+    const centerLat = 20.5937;
+    const centerLon = 78.9629;
+    return [...mapCities].sort((a, b) => {
+      const distA = (a.lat - centerLat) ** 2 + (a.lon - centerLon) ** 2;
+      const distB = (b.lat - centerLat) ** 2 + (b.lon - centerLon) ** 2;
+      return distA - distB;
+    });
+  }, [mapCities]);
   const [locations, setLocations] = useState<LocationScore[]>([]);
   const [selectedLocation, setSelectedLocation] = useState<LocationScore | null>(null);
   const [searchTerm, setSearchTerm] = useState<string>('');
@@ -206,6 +217,18 @@ const Sustainability = () => {
     renderedCount: 0,
     zoom: 5,
   });
+  const [cooldownRemainingMs, setCooldownRemainingMs] = useState(0);
+
+  useEffect(() => {
+    const update = () => {
+      const status = getApiThrottleStatus();
+      setCooldownRemainingMs(status.remainingMs);
+    };
+
+    update();
+    const timer = window.setInterval(update, 1000);
+    return () => window.clearInterval(timer);
+  }, []);
 
   const loadLiveData = useCallback(async () => {
       setLoading(true);
@@ -216,8 +239,8 @@ const Sustainability = () => {
         const parsed: LocationScore[] = [];
         let failed = 0;
 
-        for (let index = 0; index < mapCities.length; index += coverageConfig.batchSize) {
-          const batch = mapCities.slice(index, index + coverageConfig.batchSize);
+        for (let index = 0; index < prioritizedMapCities.length; index += coverageConfig.batchSize) {
+          const batch = prioritizedMapCities.slice(index, index + coverageConfig.batchSize);
           const settled = await Promise.allSettled(
             batch.map(async (city) => {
               const live = await fetchCurrentAirQuality(city.lat, city.lon, { allowStaleCache: true });
@@ -236,6 +259,8 @@ const Sustainability = () => {
                 so2: live.so2,
                 co: live.co,
                 updatedAt: live.updatedAt,
+                dataSource: live.dataSource,
+                cacheAgeMinutes: live.cacheAgeMinutes,
               };
               return loc;
             }),
@@ -253,10 +278,10 @@ const Sustainability = () => {
             setLocations([...parsed]);
           }
 
-          const loaded = Math.min(index + coverageConfig.batchSize, mapCities.length);
-          setLoadingProgress(Math.round((loaded / mapCities.length) * 100));
+          const loaded = Math.min(index + coverageConfig.batchSize, prioritizedMapCities.length);
+          setLoadingProgress(Math.round((loaded / prioritizedMapCities.length) * 100));
 
-          if (loaded < mapCities.length) {
+          if (loaded < prioritizedMapCities.length) {
             await new Promise((resolve) => setTimeout(resolve, coverageConfig.batchDelayMs));
           }
         }
@@ -276,7 +301,7 @@ const Sustainability = () => {
         setLoadingProgress(100);
         setLoading(false);
       }
-    }, [coverageConfig.batchDelayMs, coverageConfig.batchSize, mapCities]);
+    }, [coverageConfig.batchDelayMs, coverageConfig.batchSize, prioritizedMapCities]);
 
   useEffect(() => {
     loadLiveData();
@@ -321,6 +346,49 @@ const Sustainability = () => {
     };
   }, [locations]);
 
+  const sourceSummary = useMemo(() => {
+    const live = locations.filter((location) => location.dataSource === 'live').length;
+    const fresh = locations.filter((location) => location.dataSource === 'cache-fresh').length;
+    const stale = locations.filter((location) => location.dataSource === 'cache-stale').length;
+    return { live, fresh, stale };
+  }, [locations]);
+
+  const rankingSummary = useMemo(() => {
+    const aggregate = (items: Array<{ key: string; score: number }>) => {
+      const map = new Map<string, { total: number; count: number }>();
+      items.forEach((item) => {
+        const existing = map.get(item.key) ?? { total: 0, count: 0 };
+        map.set(item.key, { total: existing.total + item.score, count: existing.count + 1 });
+      });
+
+      return Array.from(map.entries())
+        .map(([name, value]) => ({
+          name,
+          avgScore: value.total / value.count,
+          count: value.count,
+        }))
+        .sort((a, b) => b.avgScore - a.avgScore);
+    };
+
+    const byState = aggregate(
+      locations
+        .filter((location) => location.state)
+        .map((location) => ({ key: location.state as string, score: location.score })),
+    );
+
+    const byDistrict = aggregate(
+      locations
+        .filter((location) => location.district)
+        .map((location) => ({ key: location.district as string, score: location.score })),
+    );
+
+    return {
+      topStates: byState.slice(0, 5),
+      bottomStates: [...byState].reverse().slice(0, 5),
+      topDistricts: byDistrict.slice(0, 5),
+    };
+  }, [locations]);
+
   return (
     <div className="sustainability-page">
       <div className="sustainability-header">
@@ -355,6 +423,16 @@ const Sustainability = () => {
             India-wide average score: {summary.averageScore.toFixed(1)} · Good: {summary.good.toLocaleString()} · Moderate: {summary.moderate.toLocaleString()} · Critical: {summary.critical.toLocaleString()}
             {lastUpdatedAt ? ` · Updated: ${new Date(lastUpdatedAt).toLocaleTimeString()}` : ''}
           </p>
+        )}
+        {!loading && locations.length > 0 && (
+          <p className="sustainability-subtitle">
+            Data quality · Live: {sourceSummary.live.toLocaleString()} · Cached (fresh): {sourceSummary.fresh.toLocaleString()} · Cached (stale): {sourceSummary.stale.toLocaleString()}
+          </p>
+        )}
+        {cooldownRemainingMs > 0 && (
+          <div className="rate-limit-banner" role="status" aria-live="polite">
+            API rate limit protection is active. Refreshing requests in ~{Math.ceil(cooldownRemainingMs / 1000)}s using cached results where possible.
+          </div>
         )}
       </div>
 
@@ -509,6 +587,17 @@ const Sustainability = () => {
                   {selectedLocation.lat.toFixed(2)}°, {selectedLocation.lon.toFixed(2)}°
                 </span>
               </div>
+              {(selectedLocation.dataSource || Number.isFinite(selectedLocation.cacheAgeMinutes)) && (
+                <div className="metric">
+                  <span className="metric-label">Data Quality</span>
+                  <span className="metric-value" style={{ fontSize: '0.9rem' }}>
+                    {selectedLocation.dataSource === 'live' && 'Live'}
+                    {selectedLocation.dataSource === 'cache-fresh' && 'Cached (fresh)'}
+                    {selectedLocation.dataSource === 'cache-stale' && 'Cached (stale)'}
+                    {selectedLocation.cacheAgeMinutes !== undefined ? ` · ${selectedLocation.cacheAgeMinutes} min old` : ''}
+                  </span>
+                </div>
+              )}
               {(selectedLocation.state || selectedLocation.district) && (
                 <>
                   <div className="metric">
@@ -595,6 +684,35 @@ const Sustainability = () => {
 
       <div className="info-section">
         <div className="info-grid">
+          <div className="info-card">
+            <h3>State & District Rankings</h3>
+            <p>Average sustainability score rankings based on currently loaded locations.</p>
+            <div className="guideline">
+              <strong>Top States</strong>
+              <ul>
+                {rankingSummary.topStates.map((item) => (
+                  <li key={`state-top-${item.name}`}>{item.name}: {item.avgScore.toFixed(1)} ({item.count} cities)</li>
+                ))}
+              </ul>
+            </div>
+            <div className="guideline">
+              <strong>Bottom States</strong>
+              <ul>
+                {rankingSummary.bottomStates.map((item) => (
+                  <li key={`state-bottom-${item.name}`}>{item.name}: {item.avgScore.toFixed(1)} ({item.count} cities)</li>
+                ))}
+              </ul>
+            </div>
+            <div className="guideline">
+              <strong>Top District Labels</strong>
+              <ul>
+                {rankingSummary.topDistricts.map((item) => (
+                  <li key={`district-top-${item.name}`}>{item.name}: {item.avgScore.toFixed(1)} ({item.count} cities)</li>
+                ))}
+              </ul>
+            </div>
+          </div>
+
           <div className="info-card">
             <h3>Air Quality Index (AQI)</h3>
             <p>The Air Quality Index is a composite measure that combines information on multiple air pollutants to provide a single number representing overall air quality. It ranges from 0-500, with higher values indicating worse air quality.</p>

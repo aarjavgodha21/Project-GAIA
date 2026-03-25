@@ -69,6 +69,17 @@
   font-size: 0.95rem;
 }
 
+.rate-limit-banner {
+  margin-top: 0.8rem;
+  background: rgba(251, 191, 36, 0.14);
+  border: 1px solid rgba(251, 191, 36, 0.35);
+  color: #fde68a;
+  padding: 0.75rem 0.95rem;
+  border-radius: 10px;
+  font-size: 0.88rem;
+  line-height: 1.45;
+}
+
 .sustainability-grid {
   display: grid;
   grid-template-columns: 1fr;

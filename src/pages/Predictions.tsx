@@ -17,6 +17,7 @@ import {
   computeSustainabilityScore,
   fetchCurrentAirQuality,
   fetchHistoricalAirQuality,
+  getApiThrottleStatus,
 } from '../services/airQualityService';
 import './Predictions.css';
 
@@ -52,6 +53,41 @@ type ForecastConfidence = {
   years: number;
   monthlyPoints: number;
   volatility: number;
+};
+
+type ScenarioSettings = {
+  pm25ChangePct: number;
+  no2ChangePct: number;
+  coChangePct: number;
+};
+
+type CityGroup = {
+  state: string;
+  options: CityOption[];
+};
+
+const RECENT_CITY_KEY = 'gaia:recent-city-keys';
+
+const readRecentCityKeys = (): string[] => {
+  if (typeof window === 'undefined') return [];
+  try {
+    const raw = window.localStorage.getItem(RECENT_CITY_KEY);
+    if (!raw) return [];
+    const parsed = JSON.parse(raw) as string[];
+    if (!Array.isArray(parsed)) return [];
+    return parsed.filter((item): item is string => typeof item === 'string');
+  } catch {
+    return [];
+  }
+};
+
+const writeRecentCityKeys = (keys: string[]) => {
+  if (typeof window === 'undefined') return;
+  try {
+    window.localStorage.setItem(RECENT_CITY_KEY, JSON.stringify(keys.slice(0, 8)));
+  } catch {
+    // Ignore storage write errors.
+  }
 };
 
 type CityOption = {
@@ -215,7 +251,12 @@ const getPredictedMetrics = (yearlyMetrics: YearlyMetrics[], targetYear: number)
     const fallback = points.length ? points[points.length - 1].y : 0;
     const predicted = linearRegressionPredict(points, targetYear);
     if (!Number.isFinite(predicted)) return Math.max(0, fallback);
-    return Math.max(0, predicted);
+
+    const yearsAhead = points.length ? Math.max(1, targetYear - points[points.length - 1].x) : 1;
+    const allowedChange = Math.max(4, Math.abs(fallback) * 0.28 * yearsAhead);
+    const smoothed = clamp(predicted, fallback - allowedChange, fallback + allowedChange);
+
+    return Math.max(0, smoothed);
   };
 
   const predictedAqi = predictWithFallback('aqi');
@@ -472,6 +513,7 @@ const Predictions = () => {
   const navigate = useNavigate();
   const [selectedCityKey, setSelectedCityKey] = useState('');
   const [cityQuery, setCityQuery] = useState('');
+  const [recentCityKeys, setRecentCityKeys] = useState<string[]>(() => readRecentCityKeys());
   const [year, setYear] = useState<number>(currentYear + 1);
   const [predicted, setPredicted] = useState(false);
   const [loading, setLoading] = useState(false);
@@ -480,6 +522,14 @@ const Predictions = () => {
   const [currentAqi, setCurrentAqi] = useState<number | null>(null);
   const [yearlyMetrics, setYearlyMetrics] = useState<YearlyMetrics[]>([]);
   const [monthlyAqi, setMonthlyAqi] = useState<MonthlyAqi[]>([]);
+  const [dataSource, setDataSource] = useState<'live' | 'cache-fresh' | 'cache-stale' | null>(null);
+  const [cacheAgeMinutes, setCacheAgeMinutes] = useState<number>(0);
+  const [cooldownRemainingMs, setCooldownRemainingMs] = useState(0);
+  const [scenario, setScenario] = useState<ScenarioSettings>({
+    pm25ChangePct: 0,
+    no2ChangePct: 0,
+    coChangePct: 0,
+  });
 
   const selectedCity = useMemo(
     () => CITY_OPTIONS.find((option) => option.key === selectedCityKey) ?? null,
@@ -487,19 +537,42 @@ const Predictions = () => {
   );
   const selectedCityName = selectedCity?.name ?? '';
 
+  useEffect(() => {
+    const update = () => setCooldownRemainingMs(getApiThrottleStatus().remainingMs);
+    update();
+    const timer = window.setInterval(update, 1000);
+    return () => window.clearInterval(timer);
+  }, []);
+
   const filteredCityOptions = useMemo(() => {
     const query = cityQuery.trim().toLowerCase();
-    if (!query) {
-      return CITY_OPTIONS.slice(0, 150);
-    }
+    const recent = recentCityKeys
+      .map((key) => CITY_OPTIONS.find((option) => option.key === key))
+      .filter((option): option is CityOption => Boolean(option));
 
-    const starts = CITY_OPTIONS.filter((option) => option.searchText.startsWith(query));
-    const contains = CITY_OPTIONS.filter(
-      (option) => !option.searchText.startsWith(query) && option.searchText.includes(query),
-    );
+    const pool = query
+      ? [
+          ...CITY_OPTIONS.filter((option) => option.searchText.startsWith(query)),
+          ...CITY_OPTIONS.filter((option) => !option.searchText.startsWith(query) && option.searchText.includes(query)),
+        ]
+      : [...recent, ...CITY_OPTIONS];
 
-    return [...starts, ...contains].slice(0, 150);
-  }, [cityQuery]);
+    const unique = Array.from(new Map(pool.map((option) => [option.key, option])).values()).slice(0, 220);
+    return unique;
+  }, [cityQuery, recentCityKeys]);
+
+  const groupedCityOptions = useMemo<CityGroup[]>(() => {
+    const grouped = new Map<string, CityOption[]>();
+    filteredCityOptions.forEach((option) => {
+      const bucket = grouped.get(option.state) ?? [];
+      bucket.push(option);
+      grouped.set(option.state, bucket);
+    });
+
+    return Array.from(grouped.entries())
+      .sort((a, b) => a[0].localeCompare(b[0]))
+      .map(([state, options]) => ({ state, options }));
+  }, [filteredCityOptions]);
 
   useEffect(() => {
     const loadCityData = async () => {
@@ -509,6 +582,8 @@ const Predictions = () => {
         setError('');
         setCurrentAqi(null);
         setUpdatedAt('');
+        setDataSource(null);
+        setCacheAgeMinutes(0);
         return;
       }
 
@@ -523,6 +598,8 @@ const Predictions = () => {
 
         setCurrentAqi(live.aqi);
         setUpdatedAt(live.updatedAt);
+        setDataSource(live.dataSource);
+        setCacheAgeMinutes(live.cacheAgeMinutes);
 
         const yearly = aggregateYearlyMetrics(
           historical.time,
@@ -546,15 +623,39 @@ const Predictions = () => {
     loadCityData();
   }, [selectedCity]);
 
+  useEffect(() => {
+    if (!selectedCityKey) return;
+    setRecentCityKeys((prev) => {
+      const updated = [selectedCityKey, ...prev.filter((item) => item !== selectedCityKey)].slice(0, 8);
+      writeRecentCityKeys(updated);
+      return updated;
+    });
+  }, [selectedCityKey]);
+
   const metrics = useMemo(() => {
     if (!yearlyMetrics.length) return null;
     return getPredictedMetrics(yearlyMetrics, year);
   }, [yearlyMetrics, year]);
 
+  const scenarioMetrics = useMemo(() => {
+    if (!metrics) return null;
+
+    const applyPct = (value: number, pct: number) => Math.max(0, value * (1 + pct / 100));
+
+    return {
+      aqi: Math.round(
+        applyPct(metrics.aqi, (scenario.pm25ChangePct * 0.6) + (scenario.no2ChangePct * 0.3) + (scenario.coChangePct * 0.1)),
+      ),
+      pm25: Math.round(applyPct(metrics.pm25, scenario.pm25ChangePct) * 10) / 10,
+      no2: Math.round(applyPct(metrics.no2, scenario.no2ChangePct) * 10) / 10,
+      co: Math.round(applyPct(metrics.co, scenario.coChangePct) * 10) / 10,
+    };
+  }, [metrics, scenario]);
+
   const score = useMemo(() => {
-    if (!metrics) return 0;
-    return computeSustainabilityScore(metrics.aqi, metrics.pm25, metrics.no2, metrics.co);
-  }, [metrics]);
+    if (!scenarioMetrics) return 0;
+    return computeSustainabilityScore(scenarioMetrics.aqi, scenarioMetrics.pm25, scenarioMetrics.no2, scenarioMetrics.co);
+  }, [scenarioMetrics]);
 
   const status = getScoreStatus(score);
 
@@ -569,9 +670,9 @@ const Predictions = () => {
   }, [monthlyAqi, year]);
 
   const alerts = useMemo(() => {
-    if (!selectedCityName || !metrics) return [];
-    return getRiskAlerts(selectedCityName, year, metrics, currentAqi);
-  }, [selectedCityName, year, metrics, currentAqi]);
+    if (!selectedCityName || !scenarioMetrics) return [];
+    return getRiskAlerts(selectedCityName, year, scenarioMetrics, currentAqi);
+  }, [selectedCityName, year, scenarioMetrics, currentAqi]);
 
   const confidence = useMemo(
     () => getForecastConfidence(yearlyMetrics, monthlyAqi),
@@ -579,7 +680,7 @@ const Predictions = () => {
   );
 
   const metricRanges = useMemo(() => {
-    if (!metrics) return null;
+    if (!scenarioMetrics) return null;
     const uncertaintyScale = 1 - confidence.score / 100;
 
     const buildRange = (value: number, minSpread: number, ratio: number) => {
@@ -593,15 +694,15 @@ const Predictions = () => {
     };
 
     return {
-      aqi: buildRange(metrics.aqi, 6, 0.2),
-      pm25: buildRange(metrics.pm25, 1.5, 0.25),
-      no2: buildRange(metrics.no2, 2, 0.22),
-      co: buildRange(metrics.co, 8, 0.2),
+      aqi: buildRange(scenarioMetrics.aqi, 6, 0.2),
+      pm25: buildRange(scenarioMetrics.pm25, 1.5, 0.25),
+      no2: buildRange(scenarioMetrics.no2, 2, 0.22),
+      co: buildRange(scenarioMetrics.co, 8, 0.2),
     };
-  }, [metrics, confidence.score]);
+  }, [scenarioMetrics, confidence.score]);
 
   const handlePredict = () => {
-    if (!selectedCityKey || !metrics || loading) return;
+    if (!selectedCityKey || !scenarioMetrics || loading) return;
     setPredicted(true);
   };
 
@@ -617,6 +718,43 @@ const Predictions = () => {
       return 'rgba(185, 28, 28, 0.75)';
     });
   }, [aqi]);
+
+  const downloadCsvReport = () => {
+    if (!selectedCity || !scenarioMetrics) return;
+
+    const rows = [
+      ['City', selectedCity.name],
+      ['State', selectedCity.state],
+      ['District', selectedCity.district],
+      ['Latitude', selectedCity.lat.toFixed(5)],
+      ['Longitude', selectedCity.lon.toFixed(5)],
+      ['Target Year', String(year)],
+      ['Confidence (%)', String(confidence.score)],
+      ['Data Source', dataSource ?? 'unknown'],
+      ['Cache Age (min)', String(cacheAgeMinutes)],
+      ['Predicted AQI', String(scenarioMetrics.aqi)],
+      ['Predicted PM2.5', String(scenarioMetrics.pm25)],
+      ['Predicted NO2', String(scenarioMetrics.no2)],
+      ['Predicted CO', String(scenarioMetrics.co)],
+      ['Sustainability Score', String(score)],
+      ['Generated At', new Date().toISOString()],
+    ];
+
+    const csv = rows.map((row) => row.map((cell) => `"${String(cell).replace(/"/g, '""')}"`).join(',')).join('\n');
+    const blob = new Blob([csv], { type: 'text/csv;charset=utf-8;' });
+    const url = URL.createObjectURL(blob);
+    const anchor = document.createElement('a');
+    anchor.href = url;
+    anchor.download = `gaia-report-${selectedCity.name.replace(/\s+/g, '_')}-${year}.csv`;
+    document.body.appendChild(anchor);
+    anchor.click();
+    document.body.removeChild(anchor);
+    URL.revokeObjectURL(url);
+  };
+
+  const printReport = () => {
+    window.print();
+  };
 
   return (
     <div className="predictions-page">
@@ -644,6 +782,11 @@ const Predictions = () => {
       {/* ── Input Panel ── */}
       <div className="input-panel">
         <h2>Configure Prediction</h2>
+        {cooldownRemainingMs > 0 && (
+          <div className="rate-limit-banner" role="status" aria-live="polite">
+            API cooldown active ({Math.ceil(cooldownRemainingMs / 1000)}s). Using cached/live fallback automatically.
+          </div>
+        )}
         <div className="input-row">
           <div className="input-group">
             <label htmlFor="city-select">City / Region</label>
@@ -665,8 +808,12 @@ const Predictions = () => {
               }}
             >
               <option value="">— Select a city —</option>
-              {filteredCityOptions.map((option) => (
-                <option key={option.key} value={option.key}>{option.label}</option>
+              {groupedCityOptions.map((group) => (
+                <optgroup key={group.state} label={group.state}>
+                  {group.options.map((option) => (
+                    <option key={option.key} value={option.key}>{option.label}</option>
+                  ))}
+                </optgroup>
               ))}
             </select>
             <p className="city-option-count">Showing top {filteredCityOptions.length} matches of {CITY_OPTIONS.length} locations</p>
@@ -675,6 +822,14 @@ const Predictions = () => {
                 <span className="meta-pill">State: {selectedCity.state}</span>
                 <span className="meta-pill">District: {selectedCity.district}</span>
                 <span className="meta-pill">Coords: {selectedCity.lat.toFixed(2)}, {selectedCity.lon.toFixed(2)}</span>
+              </div>
+            )}
+            {selectedCity && (
+              <div className="selected-location-meta" role="status" aria-live="polite">
+                <span className={`meta-pill quality ${dataSource === 'live' ? 'live' : dataSource === 'cache-fresh' ? 'cache-fresh' : 'cache-stale'}`}>
+                  Source: {dataSource === 'live' ? 'Live' : dataSource === 'cache-fresh' ? 'Cache (fresh)' : 'Cache (stale)'}
+                </span>
+                <span className="meta-pill">Cache age: {cacheAgeMinutes} min</span>
               </div>
             )}
           </div>
@@ -692,9 +847,27 @@ const Predictions = () => {
             </select>
           </div>
 
-          <button className="predict-btn" onClick={handlePredict} disabled={!selectedCityKey || loading || !metrics}>
+          <button className="predict-btn" onClick={handlePredict} disabled={!selectedCityKey || loading || !scenarioMetrics}>
             {loading ? 'Loading Data...' : 'Generate Prediction'}
           </button>
+        </div>
+        <div className="scenario-controls">
+          <h4>Scenario Mode (What-if adjustments)</h4>
+          <p>Adjust pollution assumptions to simulate intervention or deterioration and instantly see forecast impact.</p>
+          <div className="scenario-grid">
+            <label>
+              PM2.5 change: {scenario.pm25ChangePct}%
+              <input type="range" min={-30} max={30} step={5} value={scenario.pm25ChangePct} onChange={(e) => setScenario((prev) => ({ ...prev, pm25ChangePct: Number(e.target.value) }))} />
+            </label>
+            <label>
+              NO₂ change: {scenario.no2ChangePct}%
+              <input type="range" min={-30} max={30} step={5} value={scenario.no2ChangePct} onChange={(e) => setScenario((prev) => ({ ...prev, no2ChangePct: Number(e.target.value) }))} />
+            </label>
+            <label>
+              CO change: {scenario.coChangePct}%
+              <input type="range" min={-30} max={30} step={5} value={scenario.coChangePct} onChange={(e) => setScenario((prev) => ({ ...prev, coChangePct: Number(e.target.value) }))} />
+            </label>
+          </div>
         </div>
         {error && <p style={{ color: '#fca5a5', marginTop: '0.75rem' }}>{error}</p>}
         {selectedCity && updatedAt && !error && (
@@ -718,6 +891,10 @@ const Predictions = () => {
           {/* Score Card (full width) */}
           <div className="pred-card score-card" style={{ marginBottom: '2rem' }}>
             <h3><span className="card-icon">📊</span> Sustainability Score — {selectedCityName}, {year}</h3>
+            <div className="report-actions">
+              <button type="button" className="predict-btn report-btn" onClick={downloadCsvReport}>Download CSV Report</button>
+              <button type="button" className="predict-btn report-btn secondary" onClick={printReport}>Print / Save PDF</button>
+            </div>
             <div className="score-display">
               <div className="score-ring">
                 <svg viewBox="0 0 120 120">
@@ -771,6 +948,7 @@ const Predictions = () => {
             {/* CO Trend Chart */}
             <div className="pred-card">
               <h3><span className="card-icon">🌫️</span> CO Concentration Trend — {selectedCityName}</h3>
+              <p className="chart-note">Historical points are city observations; forecast band shows uncertainty widening over future years.</p>
               {co2 && (
                 <div className="chart-container">
                   <Line
@@ -833,6 +1011,7 @@ const Predictions = () => {
             {/* AQI Trend Chart */}
             <div className="pred-card">
               <h3><span className="card-icon">💨</span> Monthly AQI Forecast — {selectedCityName}, {year}</h3>
+              <p className="chart-note">Bar colors map AQI health categories, helping quickly identify risky seasonal windows.</p>
               {aqi && (
                 <div className="chart-container">
                   <Bar
@@ -878,28 +1057,28 @@ const Predictions = () => {
             {/* Key Metrics */}
             <div className="pred-card">
               <h3><span className="card-icon">📋</span> Predicted Metrics — {selectedCityName}, {year}</h3>
-              {metrics && (
+              {scenarioMetrics && (
                 <div className="metrics-row">
                   <div className="metric-box">
-                    <span className="metric-number">{metrics.aqi}</span>
+                    <span className="metric-number">{scenarioMetrics.aqi}</span>
                     <span className="metric-unit">AQI</span>
                     <span className="metric-name">Air Quality</span>
                     {metricRanges && <span className="metric-range">{metricRanges.aqi.lower} - {metricRanges.aqi.upper}</span>}
                   </div>
                   <div className="metric-box">
-                    <span className="metric-number">{metrics.pm25}</span>
+                    <span className="metric-number">{scenarioMetrics.pm25}</span>
                     <span className="metric-unit">µg/m³</span>
                     <span className="metric-name">PM 2.5</span>
                     {metricRanges && <span className="metric-range">{metricRanges.pm25.lower} - {metricRanges.pm25.upper}</span>}
                   </div>
                   <div className="metric-box">
-                    <span className="metric-number">{metrics.no2}</span>
+                    <span className="metric-number">{scenarioMetrics.no2}</span>
                     <span className="metric-unit">ppb</span>
                     <span className="metric-name">NO₂</span>
                     {metricRanges && <span className="metric-range">{metricRanges.no2.lower} - {metricRanges.no2.upper}</span>}
                   </div>
                   <div className="metric-box">
-                    <span className="metric-number">{metrics.co}</span>
+                    <span className="metric-number">{scenarioMetrics.co}</span>
                     <span className="metric-unit">µg/m³</span>
                     <span className="metric-name">CO</span>
                     {metricRanges && <span className="metric-range">{metricRanges.co.lower} - {metricRanges.co.upper}</span>}

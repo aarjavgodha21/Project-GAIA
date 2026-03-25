@@ -88,6 +88,16 @@
   margin-bottom: 1.25rem;
 }
 
+.rate-limit-banner {
+  margin-bottom: 0.85rem;
+  background: rgba(251, 191, 36, 0.14);
+  border: 1px solid rgba(251, 191, 36, 0.32);
+  color: #fde68a;
+  border-radius: 10px;
+  padding: 0.65rem 0.8rem;
+  font-size: 0.85rem;
+}
+
 .input-row {
   display: flex;
   flex-wrap: wrap;
@@ -133,6 +143,62 @@
   font-size: 0.72rem;
   font-weight: 600;
   letter-spacing: 0.01em;
+}
+
+.meta-pill.quality.live {
+  color: #6ee7b7;
+  border-color: rgba(16, 185, 129, 0.4);
+}
+
+.meta-pill.quality.cache-fresh {
+  color: #93c5fd;
+  border-color: rgba(59, 130, 246, 0.4);
+}
+
+.meta-pill.quality.cache-stale {
+  color: #fcd34d;
+  border-color: rgba(251, 191, 36, 0.4);
+}
+
+.scenario-controls {
+  margin-top: 1rem;
+  padding: 0.9rem 1rem;
+  border-radius: 12px;
+  border: 1px solid rgba(59, 130, 246, 0.24);
+  background: rgba(15, 23, 42, 0.45);
+}
+
+.scenario-controls h4 {
+  margin: 0;
+  font-size: 0.88rem;
+  color: #bfdbfe;
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+}
+
+.scenario-controls p {
+  margin: 0.35rem 0 0.75rem;
+  color: #94a3b8;
+  font-size: 0.82rem;
+}
+
+.scenario-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(180px, 1fr));
+  gap: 0.7rem;
+}
+
+.scenario-grid label {
+  display: flex;
+  flex-direction: column;
+  gap: 0.4rem;
+  color: #cbd5e1;
+  font-size: 0.8rem;
+  font-weight: 600;
+}
+
+.scenario-grid input[type='range'] {
+  accent-color: #10b981;
 }
 
 .input-group select,
@@ -195,6 +261,22 @@
   box-shadow: none;
 }
 
+.report-actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.65rem;
+  margin-bottom: 0.9rem;
+}
+
+.report-btn {
+  padding: 0.55rem 0.95rem;
+  font-size: 0.82rem;
+}
+
+.report-btn.secondary {
+  background: linear-gradient(135deg, #3b82f6, #1d4ed8);
+}
+
 /* ── Main Grid ── */
 .predictions-grid {
   display: grid;
@@ -230,6 +312,13 @@
   display: flex;
   align-items: center;
   gap: 0.5rem;
+}
+
+.chart-note {
+  margin: -0.25rem 0 0.8rem;
+  color: #94a3b8;
+  font-size: 0.82rem;
+  line-height: 1.45;
 }
 
 .pred-card h3 .card-icon {
