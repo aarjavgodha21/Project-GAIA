@@ -1,9 +1,11 @@
+import { Suspense, lazy } from 'react';
 import { BrowserRouter as Router, Routes, Route, useLocation } from 'react-router-dom';
 import Home from './pages/Home';
-import Sustainability from './pages/Sustainability';
-import Predictions from './pages/Predictions';
 import Footer from './components/Footer';
 import './App.css';
+
+const Sustainability = lazy(() => import('./pages/Sustainability'));
+const Predictions = lazy(() => import('./pages/Predictions'));
 
 const AppContent = () => {
   const location = useLocation();
@@ -11,11 +13,13 @@ const AppContent = () => {
 
   return (
     <>
-      <Routes>
-        <Route path="/" element={<Home />} />
-        <Route path="/sustainability" element={<Sustainability />} />
-        <Route path="/predictions" element={<Predictions />} />
-      </Routes>
+      <Suspense fallback={<div className="route-loading">Loading page...</div>}>
+        <Routes>
+          <Route path="/" element={<Home />} />
+          <Route path="/sustainability" element={<Sustainability />} />
+          <Route path="/predictions" element={<Predictions />} />
+        </Routes>
+      </Suspense>
       {!isHome && <Footer />}
     </>
   );

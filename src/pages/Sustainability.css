@@ -234,6 +234,58 @@
   animation: fadeInUp 0.8s ease-out;
 }
 
+.coverage-controls {
+  display: flex;
+  align-items: center;
+  gap: 0.75rem;
+  margin-bottom: 1rem;
+}
+
+.coverage-controls label {
+  font-size: 0.82rem;
+  text-transform: uppercase;
+  letter-spacing: 0.05em;
+  color: #94a3b8;
+  font-weight: 600;
+}
+
+.coverage-select {
+  flex: 1;
+  min-width: 180px;
+  padding: 0.65rem 0.9rem;
+  background: rgba(30, 41, 59, 0.8);
+  border: 1px solid rgba(59, 130, 246, 0.4);
+  color: #e2e8f0;
+  border-radius: 10px;
+  font-size: 0.9rem;
+}
+
+.coverage-select:focus {
+  outline: none;
+  border-color: rgba(59, 130, 246, 0.7);
+}
+
+.coverage-refresh {
+  padding: 0.65rem 0.9rem;
+  border-radius: 10px;
+  border: 1px solid rgba(16, 185, 129, 0.45);
+  background: rgba(16, 185, 129, 0.16);
+  color: #6ee7b7;
+  font-weight: 600;
+  cursor: pointer;
+  transition: all 0.25s ease;
+}
+
+.coverage-refresh:hover:not(:disabled) {
+  background: rgba(16, 185, 129, 0.24);
+  border-color: rgba(16, 185, 129, 0.7);
+}
+
+.coverage-refresh:disabled {
+  opacity: 0.55;
+  cursor: not-allowed;
+}
+
 .map-wrapper {
   height: 600px;
   border-radius: 16px;

@@ -225,6 +225,37 @@
   background: rgba(100, 116, 139, 0.3);
 }
 
+.quick-guide {
+  margin-top: 2.2rem;
+  display: grid;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  gap: 0.85rem;
+}
+
+.guide-card {
+  text-align: left;
+  padding: 0.95rem 1rem;
+  border-radius: 12px;
+  border: 1px solid rgba(59, 130, 246, 0.22);
+  background: rgba(15, 23, 42, 0.55);
+  backdrop-filter: blur(8px);
+}
+
+.guide-card h3 {
+  margin: 0 0 0.35rem;
+  font-size: 0.84rem;
+  color: #bfdbfe;
+  text-transform: uppercase;
+  letter-spacing: 0.03em;
+}
+
+.guide-card p {
+  margin: 0;
+  color: #94a3b8;
+  font-size: 0.82rem;
+  line-height: 1.5;
+}
+
 /* Responsive Design */
 @media (max-width: 768px) {
   .title {
@@ -253,6 +284,11 @@
   .logo {
     width: 100px;
     height: 100px;
+  }
+
+  .quick-guide {
+    grid-template-columns: 1fr;
+    margin-top: 1.5rem;
   }
 }
 

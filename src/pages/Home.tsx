@@ -2,6 +2,36 @@ import { motion } from 'framer-motion';
 import { useNavigate } from 'react-router-dom';
 import './Home.css';
 
+type ParticleConfig = {
+  initialX: number;
+  initialY: number;
+  animateX: number;
+  animateY: number;
+  scale: number;
+  duration: number;
+};
+
+const PARTICLE_COUNT = 20;
+
+const PARTICLE_CONFIGS: ParticleConfig[] = Array.from({ length: PARTICLE_COUNT }, (_, i) => {
+  const seed = i + 1;
+  const initialX = (seed * 37) % 100;
+  const initialY = (seed * 53) % 100;
+  const animateX = (seed * 71 + 17) % 100;
+  const animateY = (seed * 89 + 29) % 100;
+  const scale = 0.5 + ((seed * 19) % 50) / 100;
+  const duration = 10 + ((seed * 23) % 20);
+
+  return {
+    initialX,
+    initialY,
+    animateX,
+    animateY,
+    scale,
+    duration,
+  };
+});
+
 const Home = () => {
   const navigate = useNavigate();
 
@@ -9,22 +39,22 @@ const Home = () => {
     <div className="home-container">
       {/* Animated background particles */}
       <div className="background-animation">
-        {[...Array(20)].map((_, i) => (
+        {PARTICLE_CONFIGS.map((particle, i) => (
           <motion.div
             key={i}
             className="particle"
             initial={{ 
-              x: Math.random() * window.innerWidth, 
-              y: Math.random() * window.innerHeight,
-              scale: Math.random() * 0.5 + 0.5
+              x: `${particle.initialX}vw`, 
+              y: `${particle.initialY}vh`,
+              scale: particle.scale,
             }}
             animate={{
-              x: Math.random() * window.innerWidth,
-              y: Math.random() * window.innerHeight,
-              scale: Math.random() * 0.5 + 0.5
+              x: `${particle.animateX}vw`,
+              y: `${particle.animateY}vh`,
+              scale: particle.scale,
             }}
             transition={{
-              duration: Math.random() * 20 + 10,
+              duration: particle.duration,
               repeat: Infinity,
               repeatType: "reverse"
             }}
@@ -196,6 +226,26 @@ const Home = () => {
           <div className="feature-item">
             <span className="feature-dot" />
             <span className="feature-label">Data Insights</span>
+          </div>
+        </motion.div>
+
+        <motion.div
+          className="quick-guide"
+          initial={{ opacity: 0, y: 14 }}
+          animate={{ opacity: 1, y: 0 }}
+          transition={{ duration: 0.9, delay: 1.35 }}
+        >
+          <div className="guide-card">
+            <h3>1. Explore Live Map</h3>
+            <p>Track city-level sustainability across India with map markers and real-time air-quality context.</p>
+          </div>
+          <div className="guide-card">
+            <h3>2. Select Forecast City</h3>
+            <p>Pick a city with state/district metadata so predictions are clearly tied to the correct location.</p>
+          </div>
+          <div className="guide-card">
+            <h3>3. Review Risk Outlook</h3>
+            <p>Use trends, confidence, and metric ranges to prioritize areas needing intervention.</p>
           </div>
         </motion.div>
       </motion.div>

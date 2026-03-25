@@ -1,4 +1,4 @@
-import { useMemo, useState } from 'react';
+import { useEffect, useMemo, useState } from 'react';
 import { useNavigate } from 'react-router-dom';
 import {
   Chart as ChartJS,
@@ -12,6 +12,12 @@ import {
   Legend,
 } from 'chart.js';
 import { Line, Bar } from 'react-chartjs-2';
+import {
+  INDIAN_CITIES,
+  computeSustainabilityScore,
+  fetchCurrentAirQuality,
+  fetchHistoricalAirQuality,
+} from '../services/airQualityService';
 import './Predictions.css';
 
 // Register Chart.js components
@@ -26,184 +32,56 @@ ChartJS.register(
   Legend,
 );
 
-/* ───────────────────────── City Data ───────────────────────── */
-
-type CityData = {
-  /** Sustainability score (0-100) */
-  baseScore: number;
-  /** Annual score trend per year (added/subtracted per year offset) */
-  scoreTrend: number;
-  /** Historical CO₂ emissions in Mt for years 2018-2023 */
-  co2History: number[];
-  /** CO₂ growth rate per year */
-  co2Growth: number;
-  /** Historical monthly AQI (Jan-Dec) for the base year */
-  aqiMonthly: number[];
-  /** AQI trend multiplier per year offset */
-  aqiTrend: number;
-  /** Base metrics: AQI, PM2.5, NO₂, CO₂ */
-  metrics: { aqi: number; pm25: number; no2: number; co2: number };
-  /** Risk profile */
-  risks: { pm25Winter: boolean; aqiUnhealthy: boolean; greenCover: boolean; waterStress: boolean; heatIsland: boolean };
+type YearlyMetrics = {
+  year: number;
+  aqi: number;
+  pm25: number;
+  no2: number;
+  co: number;
 };
 
-const CITY_DATA: Record<string, CityData> = {
-  Delhi: {
-    baseScore: 32,
-    scoreTrend: -1.2,
-    co2History: [38.1, 39.4, 37.2, 38.8, 40.5, 41.2],
-    co2Growth: 1.1,
-    aqiMonthly: [285, 240, 195, 160, 145, 120, 95, 105, 135, 210, 350, 380],
-    aqiTrend: 1.03,
-    metrics: { aqi: 268, pm25: 118.5, no2: 52.3, co2: 41.2 },
-    risks: { pm25Winter: true, aqiUnhealthy: true, greenCover: true, waterStress: true, heatIsland: true },
-  },
-  Mumbai: {
-    baseScore: 48,
-    scoreTrend: -0.6,
-    co2History: [28.3, 29.1, 27.8, 28.9, 30.2, 30.8],
-    co2Growth: 0.8,
-    aqiMonthly: [145, 130, 120, 105, 95, 80, 72, 78, 100, 140, 175, 165],
-    aqiTrend: 1.01,
-    metrics: { aqi: 148, pm25: 62.4, no2: 34.1, co2: 30.8 },
-    risks: { pm25Winter: true, aqiUnhealthy: false, greenCover: true, waterStress: false, heatIsland: true },
-  },
-  Bangalore: {
-    baseScore: 65,
-    scoreTrend: -0.8,
-    co2History: [15.2, 15.8, 15.1, 16.0, 16.8, 17.3],
-    co2Growth: 0.6,
-    aqiMonthly: [95, 88, 82, 75, 70, 60, 55, 58, 72, 90, 110, 105],
-    aqiTrend: 1.02,
-    metrics: { aqi: 89, pm25: 38.2, no2: 24.7, co2: 17.3 },
-    risks: { pm25Winter: false, aqiUnhealthy: false, greenCover: true, waterStress: true, heatIsland: true },
-  },
-  Chennai: {
-    baseScore: 55,
-    scoreTrend: -0.4,
-    co2History: [18.5, 19.0, 18.2, 19.3, 20.1, 20.5],
-    co2Growth: 0.5,
-    aqiMonthly: [110, 100, 92, 85, 80, 68, 62, 65, 82, 105, 130, 125],
-    aqiTrend: 1.01,
-    metrics: { aqi: 102, pm25: 44.8, no2: 28.3, co2: 20.5 },
-    risks: { pm25Winter: false, aqiUnhealthy: false, greenCover: false, waterStress: true, heatIsland: true },
-  },
-  Kolkata: {
-    baseScore: 40,
-    scoreTrend: -0.9,
-    co2History: [24.6, 25.3, 24.0, 25.5, 26.8, 27.4],
-    co2Growth: 0.9,
-    aqiMonthly: [195, 170, 148, 125, 110, 88, 75, 82, 115, 165, 240, 225],
-    aqiTrend: 1.02,
-    metrics: { aqi: 185, pm25: 82.5, no2: 41.6, co2: 27.4 },
-    risks: { pm25Winter: true, aqiUnhealthy: true, greenCover: true, waterStress: false, heatIsland: true },
-  },
-  Hyderabad: {
-    baseScore: 58,
-    scoreTrend: -0.5,
-    co2History: [16.8, 17.2, 16.5, 17.5, 18.3, 18.8],
-    co2Growth: 0.55,
-    aqiMonthly: [105, 95, 88, 78, 72, 62, 55, 60, 75, 98, 125, 118],
-    aqiTrend: 1.015,
-    metrics: { aqi: 95, pm25: 40.5, no2: 26.8, co2: 18.8 },
-    risks: { pm25Winter: false, aqiUnhealthy: false, greenCover: true, waterStress: true, heatIsland: false },
-  },
-  Pune: {
-    baseScore: 62,
-    scoreTrend: -0.3,
-    co2History: [12.4, 12.8, 12.2, 13.0, 13.5, 13.9],
-    co2Growth: 0.45,
-    aqiMonthly: [88, 80, 75, 68, 62, 52, 48, 50, 65, 82, 100, 95],
-    aqiTrend: 1.01,
-    metrics: { aqi: 78, pm25: 33.8, no2: 22.5, co2: 13.9 },
-    risks: { pm25Winter: false, aqiUnhealthy: false, greenCover: false, waterStress: false, heatIsland: true },
-  },
-  Ahmedabad: {
-    baseScore: 44,
-    scoreTrend: -0.7,
-    co2History: [22.1, 22.8, 21.9, 23.0, 24.2, 24.8],
-    co2Growth: 0.85,
-    aqiMonthly: [165, 148, 132, 115, 100, 82, 70, 78, 108, 150, 195, 185],
-    aqiTrend: 1.02,
-    metrics: { aqi: 158, pm25: 70.2, no2: 38.4, co2: 24.8 },
-    risks: { pm25Winter: true, aqiUnhealthy: true, greenCover: true, waterStress: true, heatIsland: true },
-  },
-  Jaipur: {
-    baseScore: 46,
-    scoreTrend: -0.6,
-    co2History: [14.5, 15.0, 14.3, 15.2, 16.0, 16.4],
-    co2Growth: 0.6,
-    aqiMonthly: [155, 138, 122, 108, 95, 78, 68, 75, 102, 142, 185, 172],
-    aqiTrend: 1.02,
-    metrics: { aqi: 145, pm25: 65.8, no2: 35.2, co2: 16.4 },
-    risks: { pm25Winter: true, aqiUnhealthy: false, greenCover: true, waterStress: true, heatIsland: true },
-  },
-  Lucknow: {
-    baseScore: 38,
-    scoreTrend: -1.0,
-    co2History: [17.8, 18.4, 17.5, 18.6, 19.5, 20.0],
-    co2Growth: 0.75,
-    aqiMonthly: [225, 195, 165, 138, 120, 95, 82, 90, 125, 180, 275, 258],
-    aqiTrend: 1.025,
-    metrics: { aqi: 210, pm25: 95.4, no2: 45.8, co2: 20.0 },
-    risks: { pm25Winter: true, aqiUnhealthy: true, greenCover: true, waterStress: false, heatIsland: true },
-  },
-  Patna: {
-    baseScore: 35,
-    scoreTrend: -1.1,
-    co2History: [13.2, 13.8, 13.0, 14.0, 14.8, 15.3],
-    co2Growth: 0.7,
-    aqiMonthly: [245, 210, 178, 148, 128, 100, 85, 95, 138, 195, 295, 275],
-    aqiTrend: 1.03,
-    metrics: { aqi: 232, pm25: 105.2, no2: 48.5, co2: 15.3 },
-    risks: { pm25Winter: true, aqiUnhealthy: true, greenCover: true, waterStress: false, heatIsland: false },
-  },
-  Chandigarh: {
-    baseScore: 68,
-    scoreTrend: -0.2,
-    co2History: [5.8, 5.9, 5.6, 6.0, 6.2, 6.3],
-    co2Growth: 0.2,
-    aqiMonthly: [120, 105, 90, 78, 68, 55, 48, 52, 72, 100, 145, 135],
-    aqiTrend: 1.01,
-    metrics: { aqi: 82, pm25: 35.5, no2: 20.8, co2: 6.3 },
-    risks: { pm25Winter: true, aqiUnhealthy: false, greenCover: false, waterStress: false, heatIsland: false },
-  },
-  Bhopal: {
-    baseScore: 52,
-    scoreTrend: -0.5,
-    co2History: [10.5, 10.8, 10.3, 11.0, 11.5, 11.8],
-    co2Growth: 0.4,
-    aqiMonthly: [135, 120, 108, 92, 82, 68, 58, 64, 88, 125, 160, 150],
-    aqiTrend: 1.015,
-    metrics: { aqi: 115, pm25: 50.2, no2: 30.5, co2: 11.8 },
-    risks: { pm25Winter: true, aqiUnhealthy: false, greenCover: false, waterStress: false, heatIsland: false },
-  },
-  Visakhapatnam: {
-    baseScore: 60,
-    scoreTrend: -0.3,
-    co2History: [11.2, 11.5, 11.0, 11.8, 12.2, 12.5],
-    co2Growth: 0.35,
-    aqiMonthly: [92, 85, 78, 70, 65, 55, 48, 52, 68, 88, 108, 100],
-    aqiTrend: 1.01,
-    metrics: { aqi: 82, pm25: 35.0, no2: 22.8, co2: 12.5 },
-    risks: { pm25Winter: false, aqiUnhealthy: false, greenCover: false, waterStress: false, heatIsland: false },
-  },
-  Nagpur: {
-    baseScore: 50,
-    scoreTrend: -0.5,
-    co2History: [12.8, 13.2, 12.6, 13.4, 14.0, 14.4],
-    co2Growth: 0.5,
-    aqiMonthly: [128, 115, 102, 88, 78, 65, 55, 60, 82, 118, 150, 142],
-    aqiTrend: 1.015,
-    metrics: { aqi: 108, pm25: 48.5, no2: 32.0, co2: 14.4 },
-    risks: { pm25Winter: true, aqiUnhealthy: false, greenCover: true, waterStress: false, heatIsland: false },
-  },
+type MonthlyAqi = {
+  month: number;
+  valuesByYear: Map<number, number>;
 };
 
-const CITIES = Object.keys(CITY_DATA);
-const YEARS = [2024, 2025, 2026, 2027, 2028, 2029, 2030];
+type ForecastConfidence = {
+  score: number;
+  label: 'High' | 'Medium' | 'Low';
+  summary: string;
+  years: number;
+  monthlyPoints: number;
+  volatility: number;
+};
+
+type CityOption = {
+  key: string;
+  name: string;
+  lat: number;
+  lon: number;
+  state: string;
+  district: string;
+  label: string;
+  searchText: string;
+};
+
+const CITY_OPTIONS: CityOption[] = INDIAN_CITIES
+  .map((city) => ({
+    key: `${city.name}|${city.lat.toFixed(5)}|${city.lon.toFixed(5)}`,
+    name: city.name,
+    lat: city.lat,
+    lon: city.lon,
+    state: city.state ?? 'Unknown State',
+    district: city.district ?? city.name,
+    label: `${city.name}, ${city.state ?? 'Unknown State'} · ${city.district ?? city.name} district`,
+    searchText: `${city.name} ${city.state ?? ''} ${city.district ?? city.name}`.toLowerCase(),
+  }))
+  .sort((a, b) => a.name.localeCompare(b.name));
+const currentYear = new Date().getFullYear();
+const YEARS = [currentYear, currentYear + 1, currentYear + 2, currentYear + 3, currentYear + 4];
 const MONTHS = ['Jan', 'Feb', 'Mar', 'Apr', 'May', 'Jun', 'Jul', 'Aug', 'Sep', 'Oct', 'Nov', 'Dec'];
-const CO2_HISTORY_YEARS = [2018, 2019, 2020, 2021, 2022, 2023];
+
+const clamp = (value: number, min: number, max: number) => Math.max(min, Math.min(max, value));
 
 const getScoreStatus = (score: number) => {
   if (score >= 70) return 'good';
@@ -211,97 +89,311 @@ const getScoreStatus = (score: number) => {
   return 'critical';
 };
 
-/* ───────── Prediction helpers ───────── */
-
-/** Compute a city's predicted score for a given target year. */
-const getPredictedScore = (cityName: string, targetYear: number): number => {
-  const d = CITY_DATA[cityName];
-  if (!d) return 50;
-  const offset = targetYear - 2023; // base year is 2023
-  const raw = d.baseScore + d.scoreTrend * offset;
-  return Math.max(0, Math.min(100, Math.round(raw * 10) / 10));
+const stdDev = (values: number[]) => {
+  if (values.length <= 1) return 0;
+  const mean = values.reduce((sum, value) => sum + value, 0) / values.length;
+  const variance = values.reduce((sum, value) => sum + (value - mean) ** 2, 0) / values.length;
+  return Math.sqrt(variance);
 };
 
-/** Build CO₂ line-chart data: historical 2018-2023 + forecast up to targetYear. */
-const buildCo2Data = (cityName: string, targetYear: number) => {
-  const d = CITY_DATA[cityName];
-  if (!d) return { labels: [] as string[], historical: [] as number[], forecast: [] as (number | null)[] };
+const residualStdDev = (points: Array<{ x: number; y: number }>) => {
+  if (points.length <= 2) {
+    return stdDev(points.map((point) => point.y));
+  }
 
-  const forecastYears: number[] = [];
-  for (let y = 2024; y <= targetYear; y++) forecastYears.push(y);
+  const residuals = points
+    .map((point) => {
+      const predicted = linearRegressionPredict(points, point.x);
+      return Number.isFinite(predicted) ? point.y - predicted : 0;
+    });
 
-  const labels = [...CO2_HISTORY_YEARS.map(String), ...forecastYears.map(String)];
-  const lastCo2 = d.co2History[d.co2History.length - 1];
+  return stdDev(residuals);
+};
 
-  const forecastValues = forecastYears.map((_, i) => {
-    const val = lastCo2 + d.co2Growth * (i + 1);
-    return Math.round(val * 10) / 10;
+const getYearFromDate = (date: string) => Number(date.slice(0, 4));
+const getMonthFromDate = (date: string) => Number(date.slice(5, 7));
+
+const linearRegressionPredict = (points: Array<{ x: number; y: number }>, targetX: number): number => {
+  if (!points.length) return Number.NaN;
+  if (points.length === 1) return points[0].y;
+
+  const n = points.length;
+  const sumX = points.reduce((sum, point) => sum + point.x, 0);
+  const sumY = points.reduce((sum, point) => sum + point.y, 0);
+  const sumXY = points.reduce((sum, point) => sum + point.x * point.y, 0);
+  const sumXX = points.reduce((sum, point) => sum + point.x * point.x, 0);
+
+  const denominator = n * sumXX - sumX * sumX;
+  if (denominator === 0) return points[points.length - 1].y;
+
+  const slope = (n * sumXY - sumX * sumY) / denominator;
+  const intercept = (sumY - slope * sumX) / n;
+
+  return slope * targetX + intercept;
+};
+
+const aggregateYearlyMetrics = (
+  dates: string[],
+  aqi: number[],
+  pm25: number[],
+  no2: number[],
+  co: number[],
+): YearlyMetrics[] => {
+  const grouped = new Map<number, { aqi: number[]; pm25: number[]; no2: number[]; co: number[] }>();
+
+  dates.forEach((date, idx) => {
+    const year = getYearFromDate(date);
+    const group = grouped.get(year) ?? { aqi: [], pm25: [], no2: [], co: [] };
+
+    const aqiValue = aqi[idx];
+    const pm25Value = pm25[idx];
+    const no2Value = no2[idx];
+    const coValue = co[idx];
+
+    if (Number.isFinite(aqiValue)) group.aqi.push(aqiValue);
+    if (Number.isFinite(pm25Value)) group.pm25.push(pm25Value);
+    if (Number.isFinite(no2Value)) group.no2.push(no2Value);
+    if (Number.isFinite(coValue)) group.co.push(coValue);
+    grouped.set(year, group);
   });
 
-  // Historical line has values for history years, null for forecast years
-  const historical = [...d.co2History, ...forecastYears.map(() => null as number | null)];
-  // Forecast line starts from last historical point
-  const forecast = [
-    ...CO2_HISTORY_YEARS.slice(0, -1).map(() => null as number | null),
-    lastCo2,
-    ...forecastValues,
-  ];
+  const average = (values: number[]) => {
+    if (!values.length) return Number.NaN;
+    return values.reduce((sum, value) => sum + value, 0) / values.length;
+  };
 
-  return { labels, historical, forecast };
+  return Array.from(grouped.entries())
+    .sort((a, b) => a[0] - b[0])
+    .map(([year, values]) => ({
+      year,
+      aqi: average(values.aqi),
+      pm25: average(values.pm25),
+      no2: average(values.no2),
+      co: average(values.co),
+    }))
+    .filter((entry) => [entry.aqi, entry.pm25, entry.no2, entry.co].every(Number.isFinite));
 };
 
-/** Build monthly AQI bar-chart data for a given target year. */
-const buildAqiData = (cityName: string, targetYear: number) => {
-  const d = CITY_DATA[cityName];
-  if (!d) return { labels: MONTHS, values: new Array(12).fill(0) };
+const aggregateMonthlyAqi = (dates: string[], aqi: number[]): MonthlyAqi[] => {
+  const months = Array.from({ length: 12 }, (_, i) => i + 1).map((month) => ({
+    month,
+    valuesByYear: new Map<number, number>(),
+  }));
 
-  const offset = targetYear - 2023;
-  const multiplier = Math.pow(d.aqiTrend, offset);
-  const values = d.aqiMonthly.map((v) => Math.round(v * multiplier));
+  const monthYearBuckets = new Map<string, number[]>();
+
+  dates.forEach((date, idx) => {
+    const year = getYearFromDate(date);
+    const month = getMonthFromDate(date);
+    const aqiValue = aqi[idx];
+    if (!Number.isFinite(aqiValue)) return;
+    const key = `${year}-${month}`;
+    const bucket = monthYearBuckets.get(key) ?? [];
+    bucket.push(aqiValue);
+    monthYearBuckets.set(key, bucket);
+  });
+
+  monthYearBuckets.forEach((values, key) => {
+    const [yearStr, monthStr] = key.split('-');
+    const year = Number(yearStr);
+    const month = Number(monthStr);
+    const avg = values.reduce((sum, value) => sum + value, 0) / values.length;
+    months[month - 1].valuesByYear.set(year, avg);
+  });
+
+  return months;
+};
+
+const getPredictedMetrics = (yearlyMetrics: YearlyMetrics[], targetYear: number) => {
+  const buildPoints = (key: keyof Omit<YearlyMetrics, 'year'>) =>
+    yearlyMetrics
+      .map((entry) => ({ x: entry.year, y: entry[key] }))
+      .filter((entry) => Number.isFinite(entry.y));
+
+  const predictWithFallback = (key: keyof Omit<YearlyMetrics, 'year'>) => {
+    const points = buildPoints(key);
+    const fallback = points.length ? points[points.length - 1].y : 0;
+    const predicted = linearRegressionPredict(points, targetYear);
+    if (!Number.isFinite(predicted)) return Math.max(0, fallback);
+    return Math.max(0, predicted);
+  };
+
+  const predictedAqi = predictWithFallback('aqi');
+  const predictedPm25 = predictWithFallback('pm25');
+  const predictedNo2 = predictWithFallback('no2');
+  const predictedCo = predictWithFallback('co');
+
+  return {
+    aqi: Math.round(predictedAqi),
+    pm25: Math.round(predictedPm25 * 10) / 10,
+    no2: Math.round(predictedNo2 * 10) / 10,
+    co: Math.round(predictedCo * 10) / 10,
+  };
+};
+
+const buildCoTrendData = (yearlyMetrics: YearlyMetrics[], targetYear: number) => {
+  if (!yearlyMetrics.length) {
+    return {
+      labels: [] as string[],
+      historical: [] as (number | null)[],
+      forecast: [] as (number | null)[],
+      forecastLower: [] as (number | null)[],
+      forecastUpper: [] as (number | null)[],
+    };
+  }
+
+  const historicalYears = yearlyMetrics.map((entry) => entry.year);
+  const lastHistoricalYear = historicalYears[historicalYears.length - 1];
+  const futureYears = targetYear > lastHistoricalYear
+    ? Array.from({ length: targetYear - lastHistoricalYear }, (_, i) => lastHistoricalYear + i + 1)
+    : [];
+
+  const labels = [...historicalYears.map(String), ...futureYears.map(String)];
+  const historical = [...yearlyMetrics.map((entry) => Math.round(entry.co * 100) / 100), ...futureYears.map(() => null)];
+
+  const points = yearlyMetrics.map((entry) => ({ x: entry.year, y: entry.co }));
+  const safePoints = points.filter((point) => Number.isFinite(point.y));
+  const fallback = safePoints.length ? safePoints[safePoints.length - 1].y : 0;
+  const residual = residualStdDev(safePoints);
+  const forecastValues = futureYears.map((year) => {
+    const predicted = linearRegressionPredict(safePoints, year);
+    return Math.max(0, Number.isFinite(predicted) ? predicted : fallback);
+  });
+
+  const forecastLowerValues = forecastValues.map((value, index) => {
+    const spread = Math.max(0.2, residual * (1 + index * 0.15));
+    return Math.max(0, value - spread);
+  });
+
+  const forecastUpperValues = forecastValues.map((value, index) => {
+    const spread = Math.max(0.2, residual * (1 + index * 0.15));
+    return value + spread;
+  });
+
+  const forecast: (number | null)[] = [
+    ...historicalYears.slice(0, -1).map(() => null),
+    Math.round(yearlyMetrics[yearlyMetrics.length - 1].co * 100) / 100,
+    ...forecastValues.map((value) => Math.round(value * 100) / 100),
+  ];
+
+  const forecastLower: (number | null)[] = [
+    ...historicalYears.map(() => null),
+    ...forecastLowerValues.map((value) => Math.round(value * 100) / 100),
+  ];
+
+  const forecastUpper: (number | null)[] = [
+    ...historicalYears.map(() => null),
+    ...forecastUpperValues.map((value) => Math.round(value * 100) / 100),
+  ];
+
+  return { labels, historical, forecast, forecastLower, forecastUpper };
+};
+
+const buildAqiData = (monthly: MonthlyAqi[], targetYear: number) => {
+  const values = monthly.map((monthData) => {
+    const points = Array.from(monthData.valuesByYear.entries()).map(([year, value]) => ({ x: year, y: value }));
+    const fallback = points.length ? points[points.length - 1].y : 0;
+    const predicted = linearRegressionPredict(points, targetYear);
+    const safePredicted = Number.isFinite(predicted) ? predicted : fallback;
+    const nonNegative = Math.max(0, safePredicted);
+    return Math.round(nonNegative);
+  });
 
   return { labels: MONTHS, values };
 };
 
-/** Get predicted metrics adjusted for year offset. */
-const getPredictedMetrics = (cityName: string, targetYear: number) => {
-  const d = CITY_DATA[cityName];
-  if (!d) return { aqi: 0, pm25: 0, no2: 0, co2: 0 };
+const getForecastConfidence = (yearlyMetrics: YearlyMetrics[], monthlyAqi: MonthlyAqi[]): ForecastConfidence => {
+  if (!yearlyMetrics.length) {
+    return {
+      score: 0,
+      label: 'Low',
+      summary: 'Insufficient historical data to estimate confidence.',
+      years: 0,
+      monthlyPoints: 0,
+      volatility: 0,
+    };
+  }
 
-  const offset = targetYear - 2023;
-  const aqiMult = Math.pow(d.aqiTrend, offset);
-  return {
-    aqi: Math.round(d.metrics.aqi * aqiMult),
-    pm25: Math.round(d.metrics.pm25 * aqiMult * 10) / 10,
-    no2: Math.round(d.metrics.no2 * aqiMult * 10) / 10,
-    co2: Math.round((d.metrics.co2 + d.co2Growth * offset) * 10) / 10,
-  };
+  const years = yearlyMetrics.length;
+  const monthlyPoints = monthlyAqi.reduce((sum, month) => sum + month.valuesByYear.size, 0);
+  const yearlyAqi = yearlyMetrics.map((entry) => entry.aqi);
+  const volatility = stdDev(yearlyAqi);
+
+  const yearCoverage = clamp(years / 8, 0, 1);
+  const monthCoverage = clamp(monthlyPoints / (12 * 5), 0, 1);
+  const stability = 1 - clamp(volatility / 80, 0, 1);
+
+  const score = Math.round((yearCoverage * 0.45 + monthCoverage * 0.25 + stability * 0.3) * 100);
+  const label: ForecastConfidence['label'] = score >= 75 ? 'High' : score >= 55 ? 'Medium' : 'Low';
+
+  const summary =
+    label === 'High'
+      ? 'Strong signal from historical trends with relatively stable year-over-year behavior.'
+      : label === 'Medium'
+        ? 'Reasonable signal, but variability and/or limited history can affect precision.'
+        : 'Low confidence due to limited history or high volatility. Treat as directional guidance.';
+
+  return { score, label, summary, years, monthlyPoints, volatility };
 };
 
-/** Generate dynamic risk alerts. */
-const getRiskAlerts = (cityName: string, targetYear: number) => {
-  const d = CITY_DATA[cityName];
-  if (!d) return [];
-
+const getRiskAlerts = (
+  cityName: string,
+  targetYear: number,
+  metrics: { aqi: number; pm25: number; no2: number; co: number },
+  currentAqi: number | null,
+) => {
   const alerts: { type: 'warning' | 'danger' | 'info'; icon: string; text: string }[] = [];
-  const metrics = getPredictedMetrics(cityName, targetYear);
 
-  if (d.risks.pm25Winter) {
-    alerts.push({ type: 'warning', icon: '⚠️', text: `PM2.5 levels projected to reach ${Math.round(metrics.pm25 * 1.6)} µg/m³ during winter months, exceeding safe limits.` });
+  if (metrics.pm25 > 60) {
+    alerts.push({
+      type: 'danger',
+      icon: '🔴',
+      text: `Predicted PM2.5 is ${metrics.pm25} µg/m³ in ${targetYear}, above high-risk limits.`,
+    });
+  } else if (metrics.pm25 > 35) {
+    alerts.push({
+      type: 'warning',
+      icon: '⚠️',
+      text: `Predicted PM2.5 is ${metrics.pm25} µg/m³ in ${targetYear}. Sensitive groups may be affected.`,
+    });
   }
-  if (d.risks.aqiUnhealthy || metrics.aqi > 150) {
-    alerts.push({ type: 'danger', icon: '🔴', text: `AQI may reach "Unhealthy" category (${metrics.aqi > 150 ? metrics.aqi : '>150'}) by Q4 ${targetYear}.` });
+
+  if (metrics.aqi > 150) {
+    alerts.push({
+      type: 'danger',
+      icon: '🚨',
+      text: `Forecast AQI of ${metrics.aqi} indicates unhealthy air in ${cityName} by ${targetYear}.`,
+    });
+  } else if (metrics.aqi > 100) {
+    alerts.push({
+      type: 'warning',
+      icon: '⚠️',
+      text: `Forecast AQI of ${metrics.aqi} is above moderate levels in ${targetYear}.`,
+    });
   }
-  if (d.risks.waterStress) {
-    alerts.push({ type: 'warning', icon: '💧', text: `${cityName} faces water stress — groundwater depletion trends indicate risk by ${targetYear}.` });
+
+  if (metrics.no2 > 100) {
+    alerts.push({
+      type: 'warning',
+      icon: '🧪',
+      text: `NO₂ is projected at ${metrics.no2} ppb in ${targetYear}, indicating traffic and combustion pressure.`,
+    });
   }
-  if (d.risks.heatIsland) {
-    alerts.push({ type: 'warning', icon: '🌡️', text: `Urban heat island effect is intensifying. Summer temperatures may rise 1.5-2°C above rural areas.` });
+
+  if (currentAqi !== null) {
+    alerts.push({
+      type: 'info',
+      icon: '📡',
+      text: `Live AQI right now is ${Math.round(currentAqi)}. Forecasts are trained on daily data from 2020 onward.`,
+    });
   }
-  if (d.risks.greenCover) {
-    alerts.push({ type: 'info', icon: 'ℹ️', text: `Green cover initiatives could improve ${cityName}'s score by an estimated 8-12 points.` });
-  }
-  if (!d.risks.aqiUnhealthy && metrics.aqi <= 100) {
-    alerts.push({ type: 'info', icon: '✅', text: `${cityName} is maintaining relatively good air quality. Continued monitoring recommended.` });
+
+  if (!alerts.length) {
+    alerts.push({
+      type: 'info',
+      icon: '✅',
+      text: `No severe pollution risks are projected for ${cityName} in ${targetYear} based on current trends.`,
+    });
   }
 
   return alerts;
@@ -329,7 +421,7 @@ const co2ChartOptions = {
       padding: 10,
       callbacks: {
         label: (ctx: { dataset: { label?: string }; parsed: { y: number | null } }) =>
-          ctx.parsed.y != null ? `${ctx.dataset.label}: ${ctx.parsed.y} Mt` : '',
+          ctx.parsed.y != null ? `${ctx.dataset.label}: ${ctx.parsed.y.toFixed(2)} µg/m³` : '',
       },
     },
   },
@@ -337,8 +429,11 @@ const co2ChartOptions = {
     x: { grid: { color: chartGridColor }, ticks: { color: chartTickColor } },
     y: {
       grid: { color: chartGridColor },
-      ticks: { color: chartTickColor, callback: (v: string | number) => `${v} Mt` },
-      title: { display: true, text: 'CO₂ (Mt)', color: chartTickColor },
+      ticks: {
+        color: chartTickColor,
+        callback: (v: string | number) => `${Number(v).toFixed(2)} µg/m³`,
+      },
+      title: { display: true, text: 'CO (µg/m³)', color: chartTickColor },
     },
   },
 };
@@ -375,20 +470,138 @@ const aqiChartOptions = {
 
 const Predictions = () => {
   const navigate = useNavigate();
-  const [city, setCity] = useState('');
-  const [year, setYear] = useState<number>(2026);
+  const [selectedCityKey, setSelectedCityKey] = useState('');
+  const [cityQuery, setCityQuery] = useState('');
+  const [year, setYear] = useState<number>(currentYear + 1);
   const [predicted, setPredicted] = useState(false);
+  const [loading, setLoading] = useState(false);
+  const [error, setError] = useState('');
+  const [updatedAt, setUpdatedAt] = useState('');
+  const [currentAqi, setCurrentAqi] = useState<number | null>(null);
+  const [yearlyMetrics, setYearlyMetrics] = useState<YearlyMetrics[]>([]);
+  const [monthlyAqi, setMonthlyAqi] = useState<MonthlyAqi[]>([]);
 
-  const score = useMemo(() => (city ? getPredictedScore(city, year) : 0), [city, year]);
+  const selectedCity = useMemo(
+    () => CITY_OPTIONS.find((option) => option.key === selectedCityKey) ?? null,
+    [selectedCityKey],
+  );
+  const selectedCityName = selectedCity?.name ?? '';
+
+  const filteredCityOptions = useMemo(() => {
+    const query = cityQuery.trim().toLowerCase();
+    if (!query) {
+      return CITY_OPTIONS.slice(0, 150);
+    }
+
+    const starts = CITY_OPTIONS.filter((option) => option.searchText.startsWith(query));
+    const contains = CITY_OPTIONS.filter(
+      (option) => !option.searchText.startsWith(query) && option.searchText.includes(query),
+    );
+
+    return [...starts, ...contains].slice(0, 150);
+  }, [cityQuery]);
+
+  useEffect(() => {
+    const loadCityData = async () => {
+      if (!selectedCity) {
+        setYearlyMetrics([]);
+        setMonthlyAqi([]);
+        setError('');
+        setCurrentAqi(null);
+        setUpdatedAt('');
+        return;
+      }
+
+      setLoading(true);
+      setError('');
+      try {
+        const endDate = new Date().toISOString().slice(0, 10);
+        const [live, historical] = await Promise.all([
+          fetchCurrentAirQuality(selectedCity.lat, selectedCity.lon),
+          fetchHistoricalAirQuality(selectedCity.lat, selectedCity.lon, '2020-01-01', endDate),
+        ]);
+
+        setCurrentAqi(live.aqi);
+        setUpdatedAt(live.updatedAt);
+
+        const yearly = aggregateYearlyMetrics(
+          historical.time,
+          historical.aqi,
+          historical.pm25,
+          historical.no2,
+          historical.co,
+        );
+
+        const monthly = aggregateMonthlyAqi(historical.time, historical.aqi);
+        setYearlyMetrics(yearly);
+        setMonthlyAqi(monthly);
+      } catch (err) {
+        const message = err instanceof Error ? err.message : 'Failed to load prediction data.';
+        setError(`${message} Please retry after checking network access.`);
+      } finally {
+        setLoading(false);
+      }
+    };
+
+    loadCityData();
+  }, [selectedCity]);
+
+  const metrics = useMemo(() => {
+    if (!yearlyMetrics.length) return null;
+    return getPredictedMetrics(yearlyMetrics, year);
+  }, [yearlyMetrics, year]);
+
+  const score = useMemo(() => {
+    if (!metrics) return 0;
+    return computeSustainabilityScore(metrics.aqi, metrics.pm25, metrics.no2, metrics.co);
+  }, [metrics]);
+
   const status = getScoreStatus(score);
 
-  const co2 = useMemo(() => (city ? buildCo2Data(city, year) : null), [city, year]);
-  const aqi = useMemo(() => (city ? buildAqiData(city, year) : null), [city, year]);
-  const metrics = useMemo(() => (city ? getPredictedMetrics(city, year) : null), [city, year]);
-  const alerts = useMemo(() => (city ? getRiskAlerts(city, year) : []), [city, year]);
+  const co2 = useMemo(() => {
+    if (!yearlyMetrics.length) return null;
+    return buildCoTrendData(yearlyMetrics, year);
+  }, [yearlyMetrics, year]);
+
+  const aqi = useMemo(() => {
+    if (!monthlyAqi.length) return null;
+    return buildAqiData(monthlyAqi, year);
+  }, [monthlyAqi, year]);
+
+  const alerts = useMemo(() => {
+    if (!selectedCityName || !metrics) return [];
+    return getRiskAlerts(selectedCityName, year, metrics, currentAqi);
+  }, [selectedCityName, year, metrics, currentAqi]);
+
+  const confidence = useMemo(
+    () => getForecastConfidence(yearlyMetrics, monthlyAqi),
+    [yearlyMetrics, monthlyAqi],
+  );
+
+  const metricRanges = useMemo(() => {
+    if (!metrics) return null;
+    const uncertaintyScale = 1 - confidence.score / 100;
+
+    const buildRange = (value: number, minSpread: number, ratio: number) => {
+      const spread = Math.max(minSpread, value * ratio * uncertaintyScale);
+      const lower = Math.max(0, value - spread);
+      const upper = value + spread;
+      return {
+        lower: Math.round(lower * 10) / 10,
+        upper: Math.round(upper * 10) / 10,
+      };
+    };
+
+    return {
+      aqi: buildRange(metrics.aqi, 6, 0.2),
+      pm25: buildRange(metrics.pm25, 1.5, 0.25),
+      no2: buildRange(metrics.no2, 2, 0.22),
+      co: buildRange(metrics.co, 8, 0.2),
+    };
+  }, [metrics, confidence.score]);
 
   const handlePredict = () => {
-    if (!city) return;
+    if (!selectedCityKey || !metrics || loading) return;
     setPredicted(true);
   };
 
@@ -421,7 +634,10 @@ const Predictions = () => {
           </button>
         </div>
         <p className="predictions-subtitle">
-          Select a city and target year to generate sustainability predictions powered by machine learning models trained on historical air-quality data.
+          Select a city and target year to generate sustainability forecasts from live and historical pollution data (Open-Meteo model outputs, 2020-present).
+        </p>
+        <p className="predictions-subtitle">
+          Forecasts use city coordinates with state and district metadata for better location clarity. District names are locality-based labels when official district boundaries are unavailable.
         </p>
       </div>
 
@@ -431,16 +647,36 @@ const Predictions = () => {
         <div className="input-row">
           <div className="input-group">
             <label htmlFor="city-select">City / Region</label>
+            <input
+              type="text"
+              placeholder="Search city..."
+              value={cityQuery}
+              onChange={(e) => setCityQuery(e.target.value)}
+            />
             <select
               id="city-select"
-              value={city}
-              onChange={(e) => { setCity(e.target.value); setPredicted(false); }}
+              value={selectedCityKey}
+              onChange={(e) => {
+                const key = e.target.value;
+                setSelectedCityKey(key);
+                const option = CITY_OPTIONS.find((entry) => entry.key === key);
+                setCityQuery(option?.name ?? '');
+                setPredicted(false);
+              }}
             >
               <option value="">— Select a city —</option>
-              {CITIES.map((c) => (
-                <option key={c} value={c}>{c}</option>
+              {filteredCityOptions.map((option) => (
+                <option key={option.key} value={option.key}>{option.label}</option>
               ))}
             </select>
+            <p className="city-option-count">Showing top {filteredCityOptions.length} matches of {CITY_OPTIONS.length} locations</p>
+            {selectedCity && (
+              <div className="selected-location-meta" role="status" aria-live="polite">
+                <span className="meta-pill">State: {selectedCity.state}</span>
+                <span className="meta-pill">District: {selectedCity.district}</span>
+                <span className="meta-pill">Coords: {selectedCity.lat.toFixed(2)}, {selectedCity.lon.toFixed(2)}</span>
+              </div>
+            )}
           </div>
 
           <div className="input-group">
@@ -456,10 +692,16 @@ const Predictions = () => {
             </select>
           </div>
 
-          <button className="predict-btn" onClick={handlePredict} disabled={!city}>
-            Generate Prediction
+          <button className="predict-btn" onClick={handlePredict} disabled={!selectedCityKey || loading || !metrics}>
+            {loading ? 'Loading Data...' : 'Generate Prediction'}
           </button>
         </div>
+        {error && <p style={{ color: '#fca5a5', marginTop: '0.75rem' }}>{error}</p>}
+        {selectedCity && updatedAt && !error && (
+          <p style={{ color: '#94a3b8', marginTop: '0.75rem', fontSize: '0.9rem' }}>
+            Live baseline updated: {new Date(updatedAt).toLocaleString()}
+          </p>
+        )}
       </div>
 
       {/* ── Results ── */}
@@ -475,7 +717,7 @@ const Predictions = () => {
         <>
           {/* Score Card (full width) */}
           <div className="pred-card score-card" style={{ marginBottom: '2rem' }}>
-            <h3><span className="card-icon">📊</span> Sustainability Score — {city}, {year}</h3>
+            <h3><span className="card-icon">📊</span> Sustainability Score — {selectedCityName}, {year}</h3>
             <div className="score-display">
               <div className="score-ring">
                 <svg viewBox="0 0 120 120">
@@ -498,7 +740,7 @@ const Predictions = () => {
               <div className="score-details">
                 <h4>{status === 'good' ? 'Healthy Outlook' : status === 'moderate' ? 'Needs Monitoring' : 'Critical Warning'}</h4>
                 <p>
-                  Based on historical trends, <strong>{city}</strong> is projected to have a
+                  Based on historical daily trends and live baseline data, <strong>{selectedCityName}</strong> is projected to have a
                   {status === 'good' ? ' strong' : status === 'moderate' ? ' moderate' : ' poor'} sustainability outlook by {year}.
                 </p>
                 <div className="score-badges">
@@ -508,16 +750,27 @@ const Predictions = () => {
                   <span className="badge info" style={{ background: 'rgba(59,130,246,0.15)', color: '#93c5fd', border: '1px solid rgba(59,130,246,0.3)' }}>
                     Year {year}
                   </span>
+                  <span className={`badge confidence ${confidence.label.toLowerCase()}`}>
+                    Confidence: {confidence.label} ({confidence.score}%)
+                  </span>
                 </div>
+              </div>
+            </div>
+            <div className="confidence-panel">
+              <p>{confidence.summary}</p>
+              <div className="confidence-stats">
+                <span>Years used: <strong>{confidence.years}</strong></span>
+                <span>Monthly points: <strong>{confidence.monthlyPoints}</strong></span>
+                <span>AQI volatility: <strong>{confidence.volatility.toFixed(1)}</strong></span>
               </div>
             </div>
           </div>
 
           {/* Charts + Alerts grid */}
           <div className="predictions-grid">
-            {/* CO₂ Trend Chart */}
+            {/* CO Trend Chart */}
             <div className="pred-card">
-              <h3><span className="card-icon">🌫️</span> CO₂ Emission Trend — {city}</h3>
+              <h3><span className="card-icon">🌫️</span> CO Concentration Trend — {selectedCityName}</h3>
               {co2 && (
                 <div className="chart-container">
                   <Line
@@ -539,12 +792,34 @@ const Predictions = () => {
                           label: 'Forecast',
                           data: co2.forecast,
                           borderColor: '#3b82f6',
-                          backgroundColor: 'rgba(59, 130, 246, 0.08)',
+                          backgroundColor: 'rgba(59, 130, 246, 0.15)',
                           borderDash: [6, 4],
-                          fill: true,
+                          fill: false,
                           tension: 0.35,
                           pointRadius: 4,
                           pointBackgroundColor: '#3b82f6',
+                          spanGaps: false,
+                        },
+                        {
+                          label: 'Forecast Lower Bound',
+                          data: co2.forecastLower,
+                          borderColor: 'rgba(59, 130, 246, 0.25)',
+                          backgroundColor: 'rgba(59, 130, 246, 0.10)',
+                          borderWidth: 1,
+                          pointRadius: 0,
+                          tension: 0.35,
+                          fill: false,
+                          spanGaps: false,
+                        },
+                        {
+                          label: 'Forecast Uncertainty Band',
+                          data: co2.forecastUpper,
+                          borderColor: 'rgba(59, 130, 246, 0.25)',
+                          backgroundColor: 'rgba(59, 130, 246, 0.14)',
+                          borderWidth: 1,
+                          pointRadius: 0,
+                          tension: 0.35,
+                          fill: '-1',
                           spanGaps: false,
                         },
                       ],
@@ -557,7 +832,7 @@ const Predictions = () => {
 
             {/* AQI Trend Chart */}
             <div className="pred-card">
-              <h3><span className="card-icon">💨</span> Monthly AQI Forecast — {city}, {year}</h3>
+              <h3><span className="card-icon">💨</span> Monthly AQI Forecast — {selectedCityName}, {year}</h3>
               {aqi && (
                 <div className="chart-container">
                   <Bar
@@ -582,12 +857,12 @@ const Predictions = () => {
 
             {/* Risk Alerts */}
             <div className="pred-card">
-              <h3><span className="card-icon">🚨</span> Risk Alerts — {city}</h3>
+              <h3><span className="card-icon">🚨</span> Risk Alerts — {selectedCityName}</h3>
               <div className="alert-list">
                 {alerts.length === 0 ? (
                   <div className="alert-item info">
                     <span className="alert-icon">✅</span>
-                    <span>No significant risks detected for {city} in {year}.</span>
+                    <span>No significant risks detected for {selectedCityName} in {year}.</span>
                   </div>
                 ) : (
                   alerts.map((alert, i) => (
@@ -602,28 +877,32 @@ const Predictions = () => {
 
             {/* Key Metrics */}
             <div className="pred-card">
-              <h3><span className="card-icon">📋</span> Predicted Metrics — {city}, {year}</h3>
+              <h3><span className="card-icon">📋</span> Predicted Metrics — {selectedCityName}, {year}</h3>
               {metrics && (
                 <div className="metrics-row">
                   <div className="metric-box">
                     <span className="metric-number">{metrics.aqi}</span>
                     <span className="metric-unit">AQI</span>
                     <span className="metric-name">Air Quality</span>
+                    {metricRanges && <span className="metric-range">{metricRanges.aqi.lower} - {metricRanges.aqi.upper}</span>}
                   </div>
                   <div className="metric-box">
                     <span className="metric-number">{metrics.pm25}</span>
                     <span className="metric-unit">µg/m³</span>
                     <span className="metric-name">PM 2.5</span>
+                    {metricRanges && <span className="metric-range">{metricRanges.pm25.lower} - {metricRanges.pm25.upper}</span>}
                   </div>
                   <div className="metric-box">
                     <span className="metric-number">{metrics.no2}</span>
                     <span className="metric-unit">ppb</span>
                     <span className="metric-name">NO₂</span>
+                    {metricRanges && <span className="metric-range">{metricRanges.no2.lower} - {metricRanges.no2.upper}</span>}
                   </div>
                   <div className="metric-box">
-                    <span className="metric-number">{metrics.co2}</span>
-                    <span className="metric-unit">Mt</span>
-                    <span className="metric-name">CO₂</span>
+                    <span className="metric-number">{metrics.co}</span>
+                    <span className="metric-unit">µg/m³</span>
+                    <span className="metric-name">CO</span>
+                    {metricRanges && <span className="metric-range">{metricRanges.co.lower} - {metricRanges.co.upper}</span>}
                   </div>
                 </div>
               )}

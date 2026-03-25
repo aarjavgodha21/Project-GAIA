@@ -12,6 +12,7 @@
   "dependencies": {
     "@types/leaflet": "^1.9.21",
     "chart.js": "^4.5.1",
+    "cities.json": "^1.1.50",
     "cors": "^2.8.6",
     "csv-parser": "^3.2.0",
     "express": "^5.2.1",

@@ -1,13 +1,16 @@
-import { useEffect, useMemo, useState } from 'react';
+import { useCallback, useEffect, useMemo, useState } from 'react';
 import { useNavigate } from 'react-router-dom';
-import { MapContainer, TileLayer, CircleMarker, Tooltip, ZoomControl, useMap } from 'react-leaflet';
-import * as XLSX from 'xlsx';
+import { MapContainer, TileLayer, CircleMarker, Tooltip, ZoomControl, useMap, useMapEvents } from 'react-leaflet';
+import { fetchCurrentAirQuality, getMapCoverageCities } from '../services/airQualityService';
+import 'leaflet/dist/leaflet.css';
 import './Sustainability.css';
 
 type LocationScore = {
   name: string;
   lat: number;
   lon: number;
+  state?: string;
+  district?: string;
   score: number;
   pm25?: number;
   pm10?: number;
@@ -15,13 +18,29 @@ type LocationScore = {
   no2?: number;
   o3?: number;
   so2?: number;
+  co?: number;
+  updatedAt?: string;
 };
-
-const DATASET_URL = '/Dataset/Dataset_AQI22-4.xlsx';
 const INDIA_BOUNDS: [[number, number], [number, number]] = [
   [6.5, 68.0],
   [37.5, 97.5],
 ];
+
+const COVERAGE_CONFIG = {
+  standard: { label: 'Standard', cityCount: 300, batchSize: 6, batchDelayMs: 160 },
+  extended: { label: 'Extended', cityCount: 700, batchSize: 8, batchDelayMs: 240 },
+  nearAll: { label: 'Near-All Cities', cityCount: 1200, batchSize: 10, batchDelayMs: 320 },
+} as const;
+
+type CoverageMode = keyof typeof COVERAGE_CONFIG;
+
+const getMarkerRenderLimit = (zoom: number) => {
+  if (zoom <= 5) return 500;
+  if (zoom <= 6) return 900;
+  if (zoom <= 7) return 1400;
+  if (zoom <= 8) return 1900;
+  return 2600;
+};
 
 const getStatus = (score: number) => {
   if (score >= 70) return { label: 'Good', className: 'good', color: '#10b981' };
@@ -57,20 +76,29 @@ const getMarkerColor = (score: number): string => {
   return colors[colorIndex];
 };
 
-const findColumn = (columns: string[], patterns: RegExp[]) =>
-  columns.find((col) => patterns.some((pattern) => pattern.test(col)));
-
 // Component to handle map interactions and panning
 const MapContent = ({ 
   selectedLocation, 
   filteredLocations,
-  onLocationClick 
+  onLocationClick,
+  onVisibleStats,
 }: { 
   selectedLocation: LocationScore | null; 
   filteredLocations: LocationScore[];
   onLocationClick: (location: LocationScore) => void;
+  onVisibleStats: (stats: { visibleCount: number; renderedCount: number; zoom: number }) => void;
 }) => {
   const map = useMap();
+  const [zoom, setZoom] = useState<number>(map.getZoom());
+  const [bounds, setBounds] = useState(() => map.getBounds());
+
+  useMapEvents({
+    moveend: () => setBounds(map.getBounds()),
+    zoomend: () => {
+      setZoom(map.getZoom());
+      setBounds(map.getBounds());
+    },
+  });
   
   useEffect(() => {
     if (selectedLocation) {
@@ -80,10 +108,50 @@ const MapContent = ({
       });
     }
   }, [selectedLocation, map]);
+
+  const visibleLocations = useMemo(() => {
+    return filteredLocations.filter((location) => bounds.contains([location.lat, location.lon]));
+  }, [filteredLocations, bounds]);
+
+  const renderedLocations = useMemo(() => {
+    const renderLimit = getMarkerRenderLimit(zoom);
+    if (visibleLocations.length <= renderLimit) {
+      return visibleLocations;
+    }
+
+    const sampled: LocationScore[] = [];
+    const step = visibleLocations.length / renderLimit;
+    for (let index = 0; index < renderLimit; index += 1) {
+      sampled.push(visibleLocations[Math.floor(index * step)]);
+    }
+
+    if (selectedLocation) {
+      const selectedKey = `${selectedLocation.name}-${selectedLocation.lat}-${selectedLocation.lon}`;
+      const hasSelected = sampled.some(
+        (location) => `${location.name}-${location.lat}-${location.lon}` === selectedKey,
+      );
+      const isVisible = visibleLocations.some(
+        (location) => `${location.name}-${location.lat}-${location.lon}` === selectedKey,
+      );
+      if (!hasSelected && isVisible) {
+        sampled[sampled.length - 1] = selectedLocation;
+      }
+    }
+
+    return sampled;
+  }, [visibleLocations, zoom, selectedLocation]);
+
+  useEffect(() => {
+    onVisibleStats({
+      visibleCount: visibleLocations.length,
+      renderedCount: renderedLocations.length,
+      zoom,
+    });
+  }, [visibleLocations.length, renderedLocations.length, zoom, onVisibleStats]);
   
   return (
     <>
-      {filteredLocations.map((location) => {
+      {renderedLocations.map((location) => {
         const status = getStatus(location.score);
         const markerColor = getMarkerColor(location.score);
         const isSelected = selectedLocation?.name === location.name && 
@@ -106,6 +174,9 @@ const MapContent = ({
           >
             <Tooltip direction="top" offset={[0, -6]} opacity={1}>
               <strong>{location.name}</strong>
+              {(location.state || location.district) && (
+                <div>{location.district ?? location.name}, {location.state ?? 'India'}</div>
+              )}
               <div>Score: {location.score.toFixed(1)} / 100</div>
               <div>Status: {status.label}</div>
               <div style={{ fontSize: '0.75rem', marginTop: '4px' }}>Click for details</div>
@@ -119,89 +190,97 @@ const MapContent = ({
 
 const Sustainability = () => {
   const navigate = useNavigate();
+  const [coverageMode, setCoverageMode] = useState<CoverageMode>('standard');
+  const coverageConfig = COVERAGE_CONFIG[coverageMode];
+  const mapCities = useMemo(() => getMapCoverageCities(coverageConfig.cityCount), [coverageConfig.cityCount]);
   const [locations, setLocations] = useState<LocationScore[]>([]);
   const [selectedLocation, setSelectedLocation] = useState<LocationScore | null>(null);
   const [searchTerm, setSearchTerm] = useState<string>('');
   const [error, setError] = useState<string>('');
+  const [failedCount, setFailedCount] = useState<number>(0);
   const [loading, setLoading] = useState<boolean>(true);
+  const [loadingProgress, setLoadingProgress] = useState<number>(0);
+  const [lastUpdatedAt, setLastUpdatedAt] = useState<string>('');
+  const [visibleStats, setVisibleStats] = useState<{ visibleCount: number; renderedCount: number; zoom: number }>({
+    visibleCount: 0,
+    renderedCount: 0,
+    zoom: 5,
+  });
 
-  useEffect(() => {
-    const loadDataset = async () => {
+  const loadLiveData = useCallback(async () => {
+      setLoading(true);
+      setLoadingProgress(0);
+      setFailedCount(0);
+      setSelectedLocation(null);
       try {
-        const response = await fetch(DATASET_URL);
-        if (!response.ok) {
-          throw new Error('Dataset not found in the public folder.');
-        }
-        const data = await response.arrayBuffer();
-        const workbook = XLSX.read(data, { type: 'array' });
-        const sheet = workbook.Sheets[workbook.SheetNames[0]];
-        const rows = XLSX.utils.sheet_to_json<Record<string, unknown>>(sheet, { defval: null });
+        const parsed: LocationScore[] = [];
+        let failed = 0;
 
-        if (!rows.length) {
-          throw new Error('Dataset is empty or could not be read.');
-        }
+        for (let index = 0; index < mapCities.length; index += coverageConfig.batchSize) {
+          const batch = mapCities.slice(index, index + coverageConfig.batchSize);
+          const settled = await Promise.allSettled(
+            batch.map(async (city) => {
+              const live = await fetchCurrentAirQuality(city.lat, city.lon, { allowStaleCache: true });
+              const loc: LocationScore = {
+                name: city.name,
+                lat: city.lat,
+                lon: city.lon,
+                state: city.state,
+                district: city.district,
+                score: live.sustainabilityScore,
+                pm25: live.pm25,
+                pm10: live.pm10,
+                aqi: live.aqi,
+                no2: live.no2,
+                o3: live.o3,
+                so2: live.so2,
+                co: live.co,
+                updatedAt: live.updatedAt,
+              };
+              return loc;
+            }),
+          );
 
-        const columns = Object.keys(rows[0]);
-        const latCol = findColumn(columns, [/lat/i, /latitude/i]);
-        const lonCol = findColumn(columns, [/lon/i, /lng/i, /long/i, /longitude/i]);
-        const scoreCol = findColumn(columns, [/score/i, /sustain/i, /index/i, /aqi/i]);
-        // Prioritize Station name, then City, then others
-        const nameCol = findColumn(columns, [/station/i]) || findColumn(columns, [/city/i, /location/i, /region/i, /district/i]);
-        
-        const pm25Col = findColumn(columns, [/pm2\.5|pm25|pm2_5/i]);
-        const pm10Col = findColumn(columns, [/pm10|pm_10/i]);
-        const aqiCol = findColumn(columns, [/^aqi$|air.*quality.*index/i]);
-        const no2Col = findColumn(columns, [/no2|nitrogen/i]);
-        const o3Col = findColumn(columns, [/o3|ozone/i]);
-        const so2Col = findColumn(columns, [/so2|sulfur/i]);
-
-        if (!latCol || !lonCol || !scoreCol) {
-          throw new Error('Required columns (lat, lon, score) not found in dataset.');
-        }
-
-        const parsed = rows
-          .map((row, index) => {
-            const lat = Number(row[latCol]);
-            const lon = Number(row[lonCol]);
-            const score = Number(row[scoreCol]);
-            const nameValue = nameCol ? String(row[nameCol]) : `Location ${index + 1}`;
-
-            if (!Number.isFinite(lat) || !Number.isFinite(lon) || !Number.isFinite(score)) {
-              return null;
+          settled.forEach((item) => {
+            if (item.status === 'fulfilled') {
+              parsed.push(item.value);
+            } else {
+              failed += 1;
             }
+          });
 
-            const loc: LocationScore = {
-              name: nameValue,
-              lat,
-              lon,
-              score,
-              pm25: pm25Col ? Number(row[pm25Col]) || undefined : undefined,
-              pm10: pm10Col ? Number(row[pm10Col]) || undefined : undefined,
-              aqi: aqiCol ? Number(row[aqiCol]) || undefined : undefined,
-              no2: no2Col ? Number(row[no2Col]) || undefined : undefined,
-              o3: o3Col ? Number(row[o3Col]) || undefined : undefined,
-              so2: so2Col ? Number(row[so2Col]) || undefined : undefined,
-            };
-            return loc;
-          })
-          .filter((item): item is LocationScore => item !== null);
+          if (parsed.length) {
+            setLocations([...parsed]);
+          }
+
+          const loaded = Math.min(index + coverageConfig.batchSize, mapCities.length);
+          setLoadingProgress(Math.round((loaded / mapCities.length) * 100));
+
+          if (loaded < mapCities.length) {
+            await new Promise((resolve) => setTimeout(resolve, coverageConfig.batchDelayMs));
+          }
+        }
 
         if (!parsed.length) {
-          throw new Error('No valid location records found in dataset.');
+          throw new Error('No live location records were returned from the air-quality service.');
         }
 
         setLocations(parsed);
+        setFailedCount(failed);
+        setLastUpdatedAt(new Date().toISOString());
         setError('');
       } catch (err) {
-        const message = err instanceof Error ? err.message : 'Failed to load dataset.';
-        setError(message);
+        const message = err instanceof Error ? err.message : 'Failed to load live sustainability data.';
+        setError(`${message} Please check internet connectivity and try again.`);
       } finally {
+        setLoadingProgress(100);
         setLoading(false);
       }
-    };
+    }, [coverageConfig.batchDelayMs, coverageConfig.batchSize, mapCities]);
 
-    loadDataset();
-  }, []);
+  useEffect(() => {
+    loadLiveData();
+  }, [loadLiveData]);
 
   const center = useMemo<[number, number]>(() => {
     if (!locations.length) {
@@ -219,6 +298,29 @@ const Sustainability = () => {
     );
   }, [locations, searchTerm]);
 
+  const summary = useMemo(() => {
+    if (!locations.length) {
+      return {
+        averageScore: 0,
+        good: 0,
+        moderate: 0,
+        critical: 0,
+      };
+    }
+
+    const averageScore = locations.reduce((sum, location) => sum + location.score, 0) / locations.length;
+    const good = locations.filter((location) => location.score >= 70).length;
+    const moderate = locations.filter((location) => location.score >= 40 && location.score < 70).length;
+    const critical = locations.length - good - moderate;
+
+    return {
+      averageScore,
+      good,
+      moderate,
+      critical,
+    };
+  }, [locations]);
+
   return (
     <div className="sustainability-page">
       <div className="sustainability-header">
@@ -234,17 +336,61 @@ const Sustainability = () => {
           </button>
         </div>
         <p className="sustainability-subtitle">Explore real-time sustainability scores across India. Each marker represents a location's ecological health status.</p>
+        <p className="sustainability-subtitle">
+          Live data is throttled and cache-aware to avoid API rate limits. When live calls are limited, recently cached values are shown automatically.
+        </p>
+        {!loading && (
+          <p className="sustainability-subtitle">
+            Showing {locations.length.toLocaleString()} cities across India
+            {failedCount > 0 ? ` (${failedCount.toLocaleString()} temporarily unavailable)` : ''}.
+          </p>
+        )}
+        {!loading && (
+          <p className="sustainability-subtitle">
+            In current view: {visibleStats.visibleCount.toLocaleString()} cities, rendering {visibleStats.renderedCount.toLocaleString()} markers at zoom {visibleStats.zoom}.
+          </p>
+        )}
+        {!loading && locations.length > 0 && (
+          <p className="sustainability-subtitle">
+            India-wide average score: {summary.averageScore.toFixed(1)} · Good: {summary.good.toLocaleString()} · Moderate: {summary.moderate.toLocaleString()} · Critical: {summary.critical.toLocaleString()}
+            {lastUpdatedAt ? ` · Updated: ${new Date(lastUpdatedAt).toLocaleTimeString()}` : ''}
+          </p>
+        )}
       </div>
 
       {loading && (
         <div className="loading-overlay">
           <div className="loading-spinner" />
-          <p className="loading-text">Loading sustainability data...</p>
+            <p className="loading-text">Loading live sustainability data... {loadingProgress}%</p>
         </div>
       )}
 
       <div className="sustainability-grid">
         <div className="panel">
+          <div className="coverage-controls">
+            <label htmlFor="coverage-mode">Coverage Mode</label>
+            <select
+              id="coverage-mode"
+              className="coverage-select"
+              value={coverageMode}
+              onChange={(e) => setCoverageMode(e.target.value as CoverageMode)}
+              disabled={loading}
+            >
+              {(Object.keys(COVERAGE_CONFIG) as CoverageMode[]).map((mode) => (
+                <option key={mode} value={mode}>
+                  {COVERAGE_CONFIG[mode].label} ({COVERAGE_CONFIG[mode].cityCount.toLocaleString()} target cities)
+                </option>
+              ))}
+            </select>
+            <button
+              className="coverage-refresh"
+              onClick={loadLiveData}
+              disabled={loading}
+              title="Refresh live data"
+            >
+              {loading ? 'Refreshing...' : 'Refresh'}
+            </button>
+          </div>
           <div className="search-wrapper">
             <input
               type="text"
@@ -304,6 +450,7 @@ const Sustainability = () => {
                 selectedLocation={selectedLocation}
                 filteredLocations={filteredLocations}
                 onLocationClick={setSelectedLocation}
+                onVisibleStats={setVisibleStats}
               />
             </MapContainer>
           </div>
@@ -320,7 +467,7 @@ const Sustainability = () => {
           </div>
           {error && (
             <div className="error">
-              {error} Place the file in public/Dataset to load it in the browser.
+              {error}
             </div>
           )}
         </div>
@@ -362,6 +509,22 @@ const Sustainability = () => {
                   {selectedLocation.lat.toFixed(2)}°, {selectedLocation.lon.toFixed(2)}°
                 </span>
               </div>
+              {(selectedLocation.state || selectedLocation.district) && (
+                <>
+                  <div className="metric">
+                    <span className="metric-label">State</span>
+                    <span className="metric-value" style={{ fontSize: '0.9rem' }}>
+                      {selectedLocation.state ?? 'Unknown'}
+                    </span>
+                  </div>
+                  <div className="metric">
+                    <span className="metric-label">District</span>
+                    <span className="metric-value" style={{ fontSize: '0.9rem' }}>
+                      {selectedLocation.district ?? selectedLocation.name}
+                    </span>
+                  </div>
+                </>
+              )}
               <div className="air-quality-section">
                 <h4>Air Quality Metrics</h4>
                 {selectedLocation.pm25 !== undefined && (
@@ -398,6 +561,18 @@ const Sustainability = () => {
                   <div className="metric-detail">
                     <span className="metric-label">SO₂</span>
                     <span className="metric-value">{selectedLocation.so2.toFixed(1)} ppb</span>
+                  </div>
+                )}
+                {selectedLocation.co !== undefined && (
+                  <div className="metric-detail">
+                    <span className="metric-label">CO</span>
+                    <span className="metric-value">{selectedLocation.co.toFixed(1)} µg/m³</span>
+                  </div>
+                )}
+                {selectedLocation.updatedAt && (
+                  <div className="metric-detail">
+                    <span className="metric-label">Updated</span>
+                    <span className="metric-value">{new Date(selectedLocation.updatedAt).toLocaleString()}</span>
                   </div>
                 )}
               </div>
@@ -452,12 +627,12 @@ const Sustainability = () => {
             <div className="calculation">
               <p><strong>Formula Components:</strong></p>
               <ul>
-                <li>Air Quality Index (AQI) - 40% weight</li>
-                <li>PM2.5 and PM10 levels - 30% weight</li>
-                <li>Pollutant concentrations (NO₂, SO₂, O₃) - 20% weight</li>
-                <li>Trend and improvements - 10% weight</li>
+                <li>US AQI (Open-Meteo) - 45% weight</li>
+                <li>PM2.5 concentration - 30% weight</li>
+                <li>NO₂ concentration - 15% weight</li>
+                <li>CO concentration - 10% weight</li>
               </ul>
-              <p className="note">Higher scores indicate better environmental health. Locations with scores above 70 are considered sustainable.</p>
+              <p className="note">Data source: Open-Meteo Air Quality API. Values are refreshed from live atmospheric model output and transformed to a 0-100 ecological health score.</p>
             </div>
           </div>
         </div>

@@ -16,3 +16,11 @@ body {
   width: 100%;
   min-height: 100vh;
 }
+.route-loading {
+  min-height: 60vh;
+  display: grid;
+  place-items: center;
+  color: #cbd5e1;
+  font-weight: 600;
+  letter-spacing: 0.02em;
+}
