@@ -1,7 +1,7 @@
 import { useCallback, useEffect, useMemo, useState } from 'react';
 import { useNavigate } from 'react-router-dom';
 import { MapContainer, TileLayer, CircleMarker, Tooltip, ZoomControl, useMap, useMapEvents } from 'react-leaflet';
-import { fetchCurrentAirQuality, fetchEnvironmentalContext, getApiThrottleStatus, getMapCoverageCities } from '../services/airQualityService';
+import { INDIAN_CITIES, fetchCurrentAirQuality, fetchEnvironmentalContext, getMapCoverageCities } from '../services/airQualityService';
 import type { EnvironmentalContext } from '../services/airQualityService';
 import 'leaflet/dist/leaflet.css';
 import './Sustainability.css';
@@ -30,12 +30,60 @@ const INDIA_BOUNDS: [[number, number], [number, number]] = [
 ];
 
 const COVERAGE_CONFIG = {
-  standard: { label: 'Standard', cityCount: 300, batchSize: 6, batchDelayMs: 160 },
-  extended: { label: 'Extended', cityCount: 700, batchSize: 8, batchDelayMs: 240 },
-  nearAll: { label: 'Near-All Cities', cityCount: 1200, batchSize: 10, batchDelayMs: 320 },
+  standard: { label: 'Standard', cityCount: 300, batchSize: 12, batchDelayMs: 0 },
+  extended: { label: 'Extended', cityCount: 700, batchSize: 14, batchDelayMs: 0 },
+  nearAll: { label: 'Near-All Cities', cityCount: 1200, batchSize: 16, batchDelayMs: 0 },
 } as const;
 
 type CoverageMode = keyof typeof COVERAGE_CONFIG;
+
+const MAJOR_CITY_OPTIONS = [
+  { label: 'Ahmedabad', aliases: ['ahmedabad', 'ahmadabad'] },
+  { label: 'Bengaluru', aliases: ['bengaluru', 'bangalore'] },
+  { label: 'Bhopal', aliases: ['bhopal'] },
+  { label: 'Chandigarh', aliases: ['chandigarh'] },
+  { label: 'Chennai', aliases: ['chennai', 'madras'] },
+  { label: 'Coimbatore', aliases: ['coimbatore'] },
+  { label: 'Delhi', aliases: ['delhi', 'new delhi'] },
+  { label: 'Faridabad', aliases: ['faridabad'] },
+  { label: 'Ghaziabad', aliases: ['ghaziabad'] },
+  { label: 'Gurugram', aliases: ['gurugram', 'gurgaon'] },
+  { label: 'Guwahati', aliases: ['guwahati'] },
+  { label: 'Hyderabad', aliases: ['hyderabad'] },
+  { label: 'Indore', aliases: ['indore'] },
+  { label: 'Jaipur', aliases: ['jaipur'] },
+  { label: 'Kanpur', aliases: ['kanpur'] },
+  { label: 'Kochi', aliases: ['kochi', 'cochin'] },
+  { label: 'Kolkata', aliases: ['kolkata', 'calcutta'] },
+  { label: 'Lucknow', aliases: ['lucknow'] },
+  { label: 'Ludhiana', aliases: ['ludhiana'] },
+  { label: 'Mumbai', aliases: ['mumbai', 'bombay'] },
+  { label: 'Nagpur', aliases: ['nagpur'] },
+  { label: 'Nashik', aliases: ['nashik', 'nasik'] },
+  { label: 'Noida', aliases: ['noida'] },
+  { label: 'Patna', aliases: ['patna'] },
+  { label: 'Pune', aliases: ['pune'] },
+  { label: 'Raipur', aliases: ['raipur'] },
+  { label: 'Ranchi', aliases: ['ranchi'] },
+  { label: 'Surat', aliases: ['surat'] },
+  { label: 'Thiruvananthapuram', aliases: ['thiruvananthapuram', 'trivandrum'] },
+  { label: 'Vadodara', aliases: ['vadodara', 'baroda'] },
+  { label: 'Varanasi', aliases: ['varanasi', 'benaras'] },
+  { label: 'Visakhapatnam', aliases: ['visakhapatnam', 'vizag'] },
+] as const;
+
+const normalizeCityName = (value: string): string =>
+  value
+    .normalize('NFD')
+    .replace(/[\u0300-\u036f]/g, '')
+    .toLowerCase()
+    .replace(/[^a-z0-9]+/g, ' ')
+    .trim();
+
+const matchesCityAlias = (aliases: readonly string[], cityName: string): boolean => {
+  const normalizedCity = normalizeCityName(cityName);
+  return aliases.some((alias) => normalizeCityName(alias) === normalizedCity);
+};
 
 const getMarkerRenderLimit = (zoom: number) => {
   if (zoom <= 5) return 500;
@@ -195,7 +243,32 @@ const Sustainability = () => {
   const navigate = useNavigate();
   const [coverageMode, setCoverageMode] = useState<CoverageMode>('standard');
   const coverageConfig = COVERAGE_CONFIG[coverageMode];
-  const mapCities = useMemo(() => getMapCoverageCities(coverageConfig.cityCount), [coverageConfig.cityCount]);
+  const mapCities = useMemo(() => {
+    const baseCities = getMapCoverageCities(coverageConfig.cityCount);
+    if (coverageMode !== 'standard') {
+      return baseCities;
+    }
+
+    const allCities = INDIAN_CITIES;
+    const majorMatches = MAJOR_CITY_OPTIONS
+      .map((city) => allCities.find((candidate) => matchesCityAlias(city.aliases, candidate.name)))
+      .filter((city): city is (typeof allCities)[number] => Boolean(city));
+
+    const getCityKey = (city: { name: string; lat: number; lon: number }) =>
+      `${city.name}-${city.lat.toFixed(4)}-${city.lon.toFixed(4)}`;
+
+    const seen = new Set<string>();
+    const merged = [...majorMatches, ...baseCities].filter((city) => {
+      const key = getCityKey(city);
+      if (seen.has(key)) {
+        return false;
+      }
+      seen.add(key);
+      return true;
+    });
+
+    return merged.slice(0, coverageConfig.cityCount);
+  }, [coverageConfig.cityCount, coverageMode]);
   const prioritizedMapCities = useMemo(() => {
     const centerLat = 20.5937;
     const centerLon = 78.9629;
@@ -220,33 +293,28 @@ const Sustainability = () => {
   });
   const [selectedEnvContext, setSelectedEnvContext] = useState<EnvironmentalContext | null>(null);
   const [envLoading, setEnvLoading] = useState<boolean>(false);
-  const [cooldownRemainingMs, setCooldownRemainingMs] = useState(0);
-
-  useEffect(() => {
-    const update = () => {
-      const status = getApiThrottleStatus();
-      setCooldownRemainingMs(status.remainingMs);
-    };
-
-    update();
-    const timer = window.setInterval(update, 1000);
-    return () => window.clearInterval(timer);
-  }, []);
 
   const loadLiveData = useCallback(async () => {
       setLoading(true);
       setLoadingProgress(0);
       setFailedCount(0);
-      setSelectedLocation(null);
+      setError('');
       try {
         const parsed: LocationScore[] = [];
         let failed = 0;
+        let lastUiSyncLoaded = 0;
+        const totalCities = prioritizedMapCities.length;
+        const syncEvery = Math.max(coverageConfig.batchSize * 3, 24);
 
         for (let index = 0; index < prioritizedMapCities.length; index += coverageConfig.batchSize) {
           const batch = prioritizedMapCities.slice(index, index + coverageConfig.batchSize);
           const settled = await Promise.allSettled(
             batch.map(async (city) => {
-              const live = await fetchCurrentAirQuality(city.lat, city.lon, { allowStaleCache: true });
+              const live = await fetchCurrentAirQuality(city.lat, city.lon, {
+                preferLive: true,
+                allowStaleCache: true,
+              });
+
               const loc: LocationScore = {
                 name: city.name,
                 lat: city.lat,
@@ -277,14 +345,16 @@ const Sustainability = () => {
             }
           });
 
-          if (parsed.length) {
+          const loaded = Math.min(index + coverageConfig.batchSize, totalCities);
+          const shouldSyncUi = loaded === totalCities || loaded - lastUiSyncLoaded >= syncEvery;
+          if (parsed.length && shouldSyncUi) {
             setLocations([...parsed]);
+            lastUiSyncLoaded = loaded;
           }
 
-          const loaded = Math.min(index + coverageConfig.batchSize, prioritizedMapCities.length);
-          setLoadingProgress(Math.round((loaded / prioritizedMapCities.length) * 100));
+          setLoadingProgress(Math.round((loaded / totalCities) * 100));
 
-          if (loaded < prioritizedMapCities.length) {
+          if (loaded < totalCities && coverageConfig.batchDelayMs > 0) {
             await new Promise((resolve) => setTimeout(resolve, coverageConfig.batchDelayMs));
           }
         }
@@ -319,7 +389,10 @@ const Sustainability = () => {
 
       setEnvLoading(true);
       try {
-        const context = await fetchEnvironmentalContext(selectedLocation.lat, selectedLocation.lon, { allowStaleCache: true });
+        const context = await fetchEnvironmentalContext(selectedLocation.lat, selectedLocation.lon, {
+          preferLive: true,
+          allowStaleCache: true,
+        });
         setSelectedEnvContext(context);
       } catch {
         setSelectedEnvContext(null);
@@ -453,11 +526,6 @@ const Sustainability = () => {
             Data quality · Live: {sourceSummary.live.toLocaleString()} · Cached (fresh): {sourceSummary.fresh.toLocaleString()} · Cached (stale): {sourceSummary.stale.toLocaleString()}
           </p>
         )}
-        {cooldownRemainingMs > 0 && (
-          <div className="rate-limit-banner" role="status" aria-live="polite">
-            API rate limit protection is active. Refreshing requests in ~{Math.ceil(cooldownRemainingMs / 1000)}s using cached results where possible.
-          </div>
-        )}
       </div>
 
       {loading && (
@@ -556,17 +624,6 @@ const Sustainability = () => {
               />
             </MapContainer>
           </div>
-          <div className="legend">
-            <span>
-              <span className="legend-dot" style={{ background: '#10b981' }} /> Good (70+)
-            </span>
-            <span>
-              <span className="legend-dot" style={{ background: '#fbbf24' }} /> Moderate (40-69)
-            </span>
-            <span>
-              <span className="legend-dot" style={{ background: '#f87171' }} /> Critical (&lt; 40)
-            </span>
-          </div>
           {error && (
             <div className="error">
               {error}
@@ -574,7 +631,7 @@ const Sustainability = () => {
           )}
         </div>
 
-        <div className="panel info-card">
+        <div className="panel info-card selected-summary-card">
           {!selectedLocation ? (
             <div className="empty-state">
               <div className="empty-icon">🗺️</div>
@@ -582,7 +639,7 @@ const Sustainability = () => {
               <p>Click on any marker on the map to view its sustainability analytics and details.</p>
             </div>
           ) : (
-            <>
+            <div className="selection-card">
               <div className="selected-location-header">
                 <h3 className="location-name">{selectedLocation.name}</h3>
                 <button 
@@ -593,51 +650,84 @@ const Sustainability = () => {
                   ✕
                 </button>
               </div>
-              <div className="metric">
-                <span className="metric-label">Sustainability Score</span>
-                <span className="metric-value" style={{ fontSize: '1.5rem' }}>
-                  {selectedLocation.score.toFixed(1)}
-                </span>
+
+              <div className="compact-topline">
+                <div className="score-chip">
+                  <span className="score-chip-label">Sustainability Score</span>
+                  <span className="score-chip-value">{selectedLocation.score.toFixed(1)}</span>
+                </div>
+                <div className="compact-badges">
+                  <span className={`status ${getStatus(selectedLocation.score).className}`}>
+                    {getStatus(selectedLocation.score).label}
+                  </span>
+                  {selectedLocation.aqi !== undefined && (
+                    <span className="aqi-pill">AQI {selectedLocation.aqi.toFixed(0)}</span>
+                  )}
+                </div>
               </div>
-              <div className="metric">
-                <span className="metric-label">Status</span>
-                <span className={`status ${getStatus(selectedLocation.score).className}`}>
-                  {getStatus(selectedLocation.score).label}
-                </span>
-              </div>
-              <div className="metric">
-                <span className="metric-label">Coordinates</span>
-                <span className="metric-value" style={{ fontSize: '0.9rem' }}>
-                  {selectedLocation.lat.toFixed(2)}°, {selectedLocation.lon.toFixed(2)}°
-                </span>
-              </div>
-              {(selectedLocation.dataSource || Number.isFinite(selectedLocation.cacheAgeMinutes)) && (
-                <div className="metric">
-                  <span className="metric-label">Data Quality</span>
-                  <span className="metric-value" style={{ fontSize: '0.9rem' }}>
-                    {selectedLocation.dataSource === 'live' && 'Live'}
-                    {selectedLocation.dataSource === 'cache-fresh' && 'Cached (fresh)'}
-                    {selectedLocation.dataSource === 'cache-stale' && 'Cached (stale)'}
-                    {selectedLocation.cacheAgeMinutes !== undefined ? ` · ${selectedLocation.cacheAgeMinutes} min old` : ''}
+
+              <div className="selection-details">
+                <div className="selection-detail">
+                  <span className="selection-key">Coordinates</span>
+                  <span className="selection-value">
+                    {selectedLocation.lat.toFixed(2)}°, {selectedLocation.lon.toFixed(2)}°
                   </span>
                 </div>
-              )}
-              {(selectedLocation.state || selectedLocation.district) && (
-                <>
-                  <div className="metric">
-                    <span className="metric-label">State</span>
-                    <span className="metric-value" style={{ fontSize: '0.9rem' }}>
-                      {selectedLocation.state ?? 'Unknown'}
+
+                {(selectedLocation.dataSource || Number.isFinite(selectedLocation.cacheAgeMinutes)) && (
+                  <div className="selection-detail">
+                    <span className="selection-key">Data Quality</span>
+                    <span className="selection-value">
+                      {selectedLocation.dataSource === 'live' && 'Live'}
+                      {selectedLocation.dataSource === 'cache-fresh' && 'Cached (fresh)'}
+                      {selectedLocation.dataSource === 'cache-stale' && 'Cached (stale)'}
+                      {selectedLocation.cacheAgeMinutes !== undefined ? ` · ${selectedLocation.cacheAgeMinutes} min old` : ''}
                     </span>
                   </div>
-                  <div className="metric">
-                    <span className="metric-label">District</span>
-                    <span className="metric-value" style={{ fontSize: '0.9rem' }}>
-                      {selectedLocation.district ?? selectedLocation.name}
-                    </span>
+                )}
+
+                {selectedLocation.updatedAt && (
+                  <div className="selection-detail">
+                    <span className="selection-key">Updated</span>
+                    <span className="selection-value">{new Date(selectedLocation.updatedAt).toLocaleString()}</span>
                   </div>
-                </>
-              )}
+                )}
+
+                {(selectedLocation.state || selectedLocation.district) && (
+                  <>
+                    <div className="selection-detail">
+                      <span className="selection-key">State</span>
+                      <span className="selection-value">{selectedLocation.state ?? 'Unknown'}</span>
+                    </div>
+                    <div className="selection-detail">
+                      <span className="selection-key">District</span>
+                      <span className="selection-value">{selectedLocation.district ?? selectedLocation.name}</span>
+                    </div>
+                  </>
+                )}
+              </div>
+            </div>
+          )}
+        </div>
+      </div>
+
+      <div className="panel map-details-panel">
+        <div className="legend">
+          <span>
+            <span className="legend-dot" style={{ background: '#10b981' }} /> Good (70+)
+          </span>
+          <span>
+            <span className="legend-dot" style={{ background: '#fbbf24' }} /> Moderate (40-69)
+          </span>
+          <span>
+            <span className="legend-dot" style={{ background: '#f87171' }} /> Critical (&lt; 40)
+          </span>
+        </div>
+
+        {selectedLocation && (
+          <div className="map-insights">
+            <h4 className="map-insights-title">Detailed Signals - {selectedLocation.name}</h4>
+            <div className="map-insights-grid">
               <div className="air-quality-section">
                 <h4>Air Quality Metrics</h4>
                 {selectedLocation.pm25 !== undefined && (
@@ -700,6 +790,23 @@ const Sustainability = () => {
                 {!envLoading && selectedEnvContext && (
                   <>
                     <div className="metric-detail">
+                      <span className="metric-label">Signal Source</span>
+                      <span className="metric-value">
+                        {selectedEnvContext.externalSignalsSource === 'live' && 'Live (GBIF + EONET)'}
+                        {selectedEnvContext.externalSignalsSource === 'partial' && 'Partial (one source unavailable)'}
+                        {selectedEnvContext.externalSignalsSource === 'unavailable' && 'Weather only (external unavailable)'}
+                      </span>
+                    </div>
+                    <div className="metric-detail">
+                      <span className="metric-label">Data Source</span>
+                      <span className="metric-value">
+                        {selectedEnvContext.dataSource === 'live' && 'Live'}
+                        {selectedEnvContext.dataSource === 'cache-fresh' && 'Cached (fresh)'}
+                        {selectedEnvContext.dataSource === 'cache-stale' && 'Cached (stale)'}
+                        {selectedEnvContext.cacheAgeMinutes !== undefined ? ` · ${selectedEnvContext.cacheAgeMinutes} min old` : ''}
+                      </span>
+                    </div>
+                    <div className="metric-detail">
                       <span className="metric-label">Humidity</span>
                       <span className="metric-value">{selectedEnvContext.humidity.toFixed(0)}%</span>
                     </div>
@@ -721,15 +828,21 @@ const Sustainability = () => {
                     </div>
                     <div className="metric-detail">
                       <span className="metric-label">Biodiversity Signal</span>
-                      <span className="metric-value">{selectedEnvContext.biodiversitySignal}</span>
+                      <span className="metric-value">
+                        {selectedEnvContext.externalSignalsSource === 'unavailable' ? 'N/A' : selectedEnvContext.biodiversitySignal}
+                      </span>
                     </div>
                     <div className="metric-detail">
                       <span className="metric-label">Wildfire Events (30d)</span>
-                      <span className="metric-value">{selectedEnvContext.wildfireEvents30d}</span>
+                      <span className="metric-value">
+                        {selectedEnvContext.externalSignalsSource === 'unavailable' ? 'N/A' : selectedEnvContext.wildfireEvents30d}
+                      </span>
                     </div>
                     <div className="metric-detail">
                       <span className="metric-label">Deforestation Proxy</span>
-                      <span className="metric-value">{selectedEnvContext.deforestationPressureProxy}</span>
+                      <span className="metric-value">
+                        {selectedEnvContext.externalSignalsSource === 'unavailable' ? 'N/A' : selectedEnvContext.deforestationPressureProxy}
+                      </span>
                     </div>
                     <div className="metric-detail">
                       <span className="metric-label">Water Quality Proxy</span>
@@ -748,21 +861,9 @@ const Sustainability = () => {
                   </div>
                 )}
               </div>
-              <div className="status-breakdown">
-                <h4>Status Breakdown</h4>
-                {selectedLocation.score >= 70 && (
-                  <p className="status-text good">✓ This location has excellent ecological health</p>
-                )}
-                {selectedLocation.score >= 40 && selectedLocation.score < 70 && (
-                  <p className="status-text moderate">⚠ This location needs environmental monitoring</p>
-                )}
-                {selectedLocation.score < 40 && (
-                  <p className="status-text critical">✕ This location requires immediate attention</p>
-                )}
-              </div>
-            </>
-          )}
-        </div>
+            </div>
+          </div>
+        )}
       </div>
 
       <div className="info-section">

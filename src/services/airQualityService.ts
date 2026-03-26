@@ -94,8 +94,8 @@ const EONET_API_BASE = 'https://eonet.gsfc.nasa.gov/api/v3';
 const CURRENT_CACHE_TTL_MS = 30 * 60 * 1000;
 const HISTORY_CACHE_TTL_MS = 6 * 60 * 60 * 1000;
 const ENVIRONMENT_CACHE_TTL_MS = 30 * 60 * 1000;
-const MAX_CONCURRENT_API_REQUESTS = 2;
-const MIN_REQUEST_GAP_MS = 260;
+const MAX_CONCURRENT_API_REQUESTS = 4;
+const MIN_REQUEST_GAP_MS = 80;
 
 let activeApiRequests = 0;
 let lastRequestStartedAt = 0;
@@ -366,16 +366,17 @@ const fetchJsonWithRetry = async (url: string, retries = 2): Promise<unknown> =>
 export const fetchCurrentAirQuality = async (
   lat: number,
   lon: number,
-  options?: { allowStaleCache?: boolean },
+  options?: { allowStaleCache?: boolean; preferLive?: boolean },
 ): Promise<LiveAirQuality> => {
   const cacheKey = `gaia:aq:current:${lat.toFixed(4)}:${lon.toFixed(4)}`;
   const cachedRaw = safeStorageGet<{ timestamp: number; value: LiveAirQuality }>(cacheKey);
   const cached = cachedRaw ? normalizeCachedLiveValue(cachedRaw) : null;
+  const preferLive = options?.preferLive ?? false;
   if (cachedRaw && cached && cachedRaw.value.updatedAt !== cached.value.updatedAt) {
     safeStorageSet(cacheKey, cached);
   }
 
-  if (cached && isCacheFresh(cached.timestamp, CURRENT_CACHE_TTL_MS)) {
+  if (!preferLive && cached && isCacheFresh(cached.timestamp, CURRENT_CACHE_TTL_MS)) {
     return {
       ...cached.value,
       dataSource: 'cache-fresh',
@@ -383,7 +384,7 @@ export const fetchCurrentAirQuality = async (
     };
   }
 
-  if (cached && options?.allowStaleCache) {
+  if (!preferLive && cached && options?.allowStaleCache) {
     return {
       ...cached.value,
       dataSource: 'cache-stale',
@@ -391,8 +392,17 @@ export const fetchCurrentAirQuality = async (
     };
   }
 
+  // In live-first mode, avoid UI stalls during API cooldown by returning cache immediately when available.
+  if (preferLive && cached && options?.allowStaleCache && getApiThrottleStatus().isCoolingDown) {
+    return {
+      ...cached.value,
+      dataSource: isCacheFresh(cached.timestamp, CURRENT_CACHE_TTL_MS) ? 'cache-fresh' : 'cache-stale',
+      cacheAgeMinutes: getCacheAgeMinutes(cached.timestamp),
+    };
+  }
+
   try {
-    const payload = await fetchJsonWithRetry(buildCurrentUrl(lat, lon)) as {
+    const payload = await fetchJsonWithRetry(buildCurrentUrl(lat, lon), 1) as {
       current?: {
         us_aqi?: unknown;
         pm2_5?: unknown;
@@ -409,17 +419,32 @@ export const fetchCurrentAirQuality = async (
       throw new Error('Live air-quality response is missing current values.');
     }
 
-    const aqi = Number(current.us_aqi);
-    const pm25 = Number(current.pm2_5);
-    const pm10 = Number(current.pm10);
-    const no2 = Number(current.nitrogen_dioxide);
-    const o3 = Number(current.ozone);
-    const so2 = Number(current.sulphur_dioxide);
-    const co = Number(current.carbon_monoxide);
+    const aqiRaw = Number(current.us_aqi);
+    const pm25Raw = Number(current.pm2_5);
+    const pm10Raw = Number(current.pm10);
+    const no2Raw = Number(current.nitrogen_dioxide);
+    const o3Raw = Number(current.ozone);
+    const so2Raw = Number(current.sulphur_dioxide);
+    const coRaw = Number(current.carbon_monoxide);
 
-    if (![aqi, pm25, pm10, no2, o3, so2, co].every(Number.isFinite)) {
-      throw new Error('Live air-quality response returned invalid numeric values.');
+    const availableCount = [aqiRaw, pm25Raw, pm10Raw, no2Raw, o3Raw, so2Raw, coRaw].filter(Number.isFinite).length;
+    if (availableCount === 0) {
+      throw new Error('Live air-quality response returned no usable numeric values.');
     }
+
+    const aqi = Number.isFinite(aqiRaw)
+      ? aqiRaw
+      : (Number.isFinite(pm25Raw) ? clamp(pm25Raw * 2, 0, 500) : 50);
+    const pm25 = Number.isFinite(pm25Raw)
+      ? pm25Raw
+      : (Number.isFinite(aqiRaw) ? clamp(aqiRaw / 2, 0, 500) : 10);
+    const pm10 = Number.isFinite(pm10Raw)
+      ? pm10Raw
+      : clamp(pm25 * 1.5, 0, 600);
+    const no2 = Number.isFinite(no2Raw) ? no2Raw : 0;
+    const o3 = Number.isFinite(o3Raw) ? o3Raw : 0;
+    const so2 = Number.isFinite(so2Raw) ? so2Raw : 0;
+    const co = Number.isFinite(coRaw) ? coRaw : 0;
 
     const live: LiveAirQuality = {
       aqi,
@@ -438,7 +463,7 @@ export const fetchCurrentAirQuality = async (
     safeStorageSet(cacheKey, { timestamp: Date.now(), value: live });
     return live;
   } catch (error) {
-    if (cached) {
+    if (cached && (isCacheFresh(cached.timestamp, CURRENT_CACHE_TTL_MS) || options?.allowStaleCache)) {
       return {
         ...cached.value,
         dataSource: isCacheFresh(cached.timestamp, CURRENT_CACHE_TTL_MS) ? 'cache-fresh' : 'cache-stale',
@@ -541,10 +566,11 @@ export const fetchHistoricalAirQuality = async (
 export const fetchEnvironmentalContext = async (
   lat: number,
   lon: number,
-  options?: { allowStaleCache?: boolean },
+  options?: { allowStaleCache?: boolean; preferLive?: boolean },
 ): Promise<EnvironmentalContext> => {
   const cacheKey = `gaia:eco:context:${lat.toFixed(4)}:${lon.toFixed(4)}`;
   const cached = safeStorageGet<{ timestamp: number; value: EnvironmentalContext }>(cacheKey);
+  const preferLive = options?.preferLive ?? false;
 
   const fromCache = (source: 'cache-fresh' | 'cache-stale') => {
     if (!cached) return null;
@@ -562,13 +588,19 @@ export const fetchEnvironmentalContext = async (
     };
   };
 
-  if (cached && isCacheFresh(cached.timestamp, ENVIRONMENT_CACHE_TTL_MS)) {
+  if (!preferLive && cached && isCacheFresh(cached.timestamp, ENVIRONMENT_CACHE_TTL_MS)) {
     const value = fromCache('cache-fresh');
     if (value) return value;
   }
 
-  if (cached && options?.allowStaleCache) {
+  if (!preferLive && cached && options?.allowStaleCache) {
     const value = fromCache('cache-stale');
+    if (value) return value;
+  }
+
+  // In live-first mode, skip cooldown waits by returning cache while APIs recover.
+  if (preferLive && cached && options?.allowStaleCache && getApiThrottleStatus().isCoolingDown) {
+    const value = fromCache(isCacheFresh(cached.timestamp, ENVIRONMENT_CACHE_TTL_MS) ? 'cache-fresh' : 'cache-stale');
     if (value) return value;
   }
 
@@ -675,7 +707,11 @@ export const fetchEnvironmentalContext = async (
     return context;
   } catch (error) {
     const fallback = cached
-      ? fromCache(isCacheFresh(cached.timestamp, ENVIRONMENT_CACHE_TTL_MS) ? 'cache-fresh' : 'cache-stale')
+      ? (isCacheFresh(cached.timestamp, ENVIRONMENT_CACHE_TTL_MS)
+        ? fromCache('cache-fresh')
+        : options?.allowStaleCache
+          ? fromCache('cache-stale')
+          : null)
       : null;
 
     if (fallback) return fallback;
