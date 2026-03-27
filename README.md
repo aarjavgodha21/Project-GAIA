@@ -55,6 +55,50 @@ Preview production build:
 npm run preview
 ```
 
+## Deploy to Vercel
+
+This project is ready for Vercel static deployment using the Vite build output.
+
+### Option 1: Deploy from GitHub (Recommended)
+
+1. Push your latest code to GitHub.
+2. Go to Vercel and click **Add New -> Project**.
+3. Import your repository.
+4. Use these project settings:
+   - Framework Preset: `Vite`
+   - Build Command: `npm run build`
+   - Output Directory: `dist`
+   - Install Command: `npm install`
+5. Click **Deploy**.
+
+If your repository contains multiple app folders, set **Root Directory** to the folder containing `package.json` for the app you want to deploy.
+
+### Option 2: Deploy with Vercel CLI
+
+```bash
+npm i -g vercel
+vercel login
+vercel
+```
+
+For production deployment:
+
+```bash
+vercel --prod
+```
+
+### Important: SPA Routing
+
+This app uses React Router. Direct URL access (for example `/predictions`) requires a rewrite to `index.html` in production. The included `vercel.json` already handles this.
+
+### Environment Variables
+
+Currently this project uses no required secret API keys for the core flow. If you add keys later:
+
+1. Add them in Vercel Project Settings -> Environment Variables.
+2. Reference them with `import.meta.env` in the app.
+3. Redeploy after updating variables.
+
 ## Project Structure
 
 ```
